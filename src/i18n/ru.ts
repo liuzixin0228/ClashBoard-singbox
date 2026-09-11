@@ -274,7 +274,7 @@ const ru: LANG_MESSAGE = {
   ruleSourceSshPort: 'SSH-порт',
   ruleSourceSshUsername: 'SSH-аккаунт',
   ruleSourceSshPassword: 'SSH-пароль',
-  ruleSourcePlugin: 'OpenClash/Nikki',
+  ruleSourcePlugin: 'OpenClash/Nikki/SingBox',
   autoDetect: 'Автоопределение',
   detectRuleSource: 'Проверить источник правил',
   detectRuleSourceFailed: 'Не удалось проверить источник правил: {status}',

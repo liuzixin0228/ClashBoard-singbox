@@ -265,7 +265,7 @@ const zh: LANG_MESSAGE = {
   ruleSourceSshPort: 'SSH 端口',
   ruleSourceSshUsername: 'SSH 账号',
   ruleSourceSshPassword: 'SSH 密码',
-  ruleSourcePlugin: 'OpenClash/Nikki',
+  ruleSourcePlugin: 'OpenClash/Nikki/SingBox',
   autoDetect: '自动检测',
   detectRuleSource: '检测规则源',
   detectRuleSourceFailed: '检测规则源失败: {status}',

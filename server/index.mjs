@@ -1185,6 +1185,79 @@ const detectNikkiRuleSourceFromOpenWrtClient = async (client) => {
   return null
 }
 
+// 提取规则集（route.rule_set）的解析函数
+const extractSingBoxRuleSetEntriesFromContent = (content) => {
+  try {
+    // 处理可能包含 JSON5/注释 的情况
+    const cleanContent = content.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '')
+    const config = JSON.parse(cleanContent)
+    const ruleSets = config?.route?.rule_set || []
+
+    return ruleSets
+      .filter((item) => item.type === 'remote') // 过滤出远程规则集
+      .map((item) => ({
+        name: item.tag,
+        format: item.format || 'binary',
+        behavior: item.format === 'binary' ? 'srs' : 'json',
+        url: item.url || '',
+      }))
+  } catch (error) {
+    return []
+  }
+}
+
+// 候选配置文件路径表
+const getSingBoxRuleSourceConfigPathCandidates = async (client) => {
+  return [
+    '/etc/momo/run/config.json', // 👈 优先检测你当前的实际路径
+    '/var/etc/sing-box/config.json',
+    '/etc/sing-box/config.json',
+    '/etc/sing-box/main.json',
+  ]
+}
+
+// sing-box 检测主入口
+const detectSingBoxRuleSourceFromOpenWrtClient = async (client) => {
+  const configPathCandidates = await getSingBoxRuleSourceConfigPathCandidates(client)
+  const checkedExistingPaths = []
+
+  for (const configPath of configPathCandidates) {
+    if (!(await remoteFileExists(client, configPath))) {
+      continue
+    }
+
+    checkedExistingPaths.push(configPath)
+
+    const content = await readRemoteFile(client, configPath)
+    const providers = extractSingBoxRuleSetEntriesFromContent(content)
+
+    if (providers.length === 0) {
+      continue
+    }
+
+    return {
+      plugin: 'singbox',
+      configPath,
+      providers,
+    }
+  }
+
+  // 抛出检测异常提示
+  if (
+    checkedExistingPaths.length > 0 ||
+    (await remoteFileExists(client, '/etc/config/momo')) ||
+    (await remotePathExists(client, '/etc/momo'))
+  ) {
+    throw new Error(
+      `sing-box/Momo detected, but no readable JSON with route.rule_set was found${
+        checkedExistingPaths.length > 0 ? `: ${checkedExistingPaths.join(', ')}` : ''
+      }.`,
+    )
+  }
+
+  return null
+}
+
 const detectOpenClashRuleSourceFromOpenWrtClient = async (client) => {
   if (!(await remoteFileExists(client, openClashUciConfigPath))) {
     return null
@@ -1222,6 +1295,7 @@ const collectRuleSourceSnapshotsFromOpenWrtClient = async (client, requestedPlug
   const detectors = [
     ['openclash', detectOpenClashRuleSourceFromOpenWrtClient],
     ['nikki', detectNikkiRuleSourceFromOpenWrtClient],
+    ['singbox', detectSingBoxRuleSourceFromOpenWrtClient],
   ].filter(([name]) => plugin === 'auto' || plugin === name)
 
   for (const [name, detector] of detectors) {

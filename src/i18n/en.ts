@@ -269,7 +269,7 @@ const en = {
   ruleSourceSshPort: 'SSH port',
   ruleSourceSshUsername: 'SSH account',
   ruleSourceSshPassword: 'SSH password',
-  ruleSourcePlugin: 'OpenClash/Nikki',
+  ruleSourcePlugin: 'OpenClash/Nikki/SingBox',
   autoDetect: 'Auto detect',
   detectRuleSource: 'Detect rule source',
   detectRuleSourceFailed: 'Failed to detect rule source: {status}',
