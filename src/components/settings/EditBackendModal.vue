@@ -89,6 +89,7 @@
                 <option value="auto">{{ t('autoDetect') }}</option>
                 <option value="openclash">OpenClash</option>
                 <option value="nikki">Nikki</option>
+                <option value="singbox">SingBox</option>
               </select>
             </div>
             <div class="flex flex-col gap-1">
