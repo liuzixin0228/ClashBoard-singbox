@@ -11,6 +11,8 @@ import { promisify } from 'node:util'
 import { Client as SshClient } from 'ssh2'
 import { WebSocket, WebSocketServer } from 'ws'
 import { isSeq as isYamlSeq, parse as parseYaml, parseDocument as parseYamlDocument } from 'yaml'
+import net from 'net'
+import os from 'node:os'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -385,7 +387,7 @@ const readActiveBackendConfig = () => {
 const normalizeRuleSourcePlugin = (value) => {
   const normalizedValue = String(value || '').trim().toLowerCase()
 
-  return ['openclash', 'nikki'].includes(normalizedValue) ? normalizedValue : 'auto'
+  return ['openclash', 'nikki','singbox'].includes(normalizedValue) ? normalizedValue : 'auto'
 }
 
 const getErrorMessage = (error) => (error instanceof Error ? error.message : String(error))
@@ -430,26 +432,26 @@ const ruleSourceSshRequiredMessages = {
     intro:
       'Rule source sync requires an SSH account and password first, and rule source detection must pass.',
     action:
-      'Go to "Settings - Backend - Edit backend configuration" > "Rule Source SSH", enter the SSH account and SSH password, choose the correct OpenClash/Nikki, then click "Detect rule source".',
+      'Go to "Settings - Backend - Edit backend configuration" > "Rule Source SSH", enter the SSH account and SSH password, choose the correct OpenClash/Nikki/SingBox, then click "Detect rule source".',
     detailPrefix: 'Current error:',
   },
   'zh-CN': {
     intro: '规则源同步需要先配置 SSH 账号和密码，并确保规则源检测通过。',
     action:
-      '请在“设置 - 后端 - 修改后端配置”的“规则源 SSH”中填写 SSH 账号、SSH 密码，选择正确的 OpenClash/Nikki 后点击“检测规则源”。',
+      '请在“设置 - 后端 - 修改后端配置”的“规则源 SSH”中填写 SSH 账号、SSH 密码，选择正确的 OpenClash/Nikki/SingBox 后点击“检测规则源”。',
     detailPrefix: '当前错误：',
   },
   'zh-TW': {
     intro: '規則源同步需要先配置 SSH 帳號和密碼，並確保規則源檢測通過。',
     action:
-      '請在「設定 - 後端 - 修改後端配置」的「規則源 SSH」中填寫 SSH 帳號、SSH 密碼，選擇正確的 OpenClash/Nikki 後點擊「檢測規則源」。',
+      '請在「設定 - 後端 - 修改後端配置」的「規則源 SSH」中填寫 SSH 帳號、SSH 密碼，選擇正確的 OpenClash/Nikki/SingBox 後點擊「檢測規則源」。',
     detailPrefix: '目前錯誤：',
   },
   'ru-RU': {
     intro:
       'Для синхронизации источников правил сначала укажите SSH-аккаунт и пароль, а затем убедитесь, что проверка источника правил проходит успешно.',
     action:
-      'Откройте «Настройки - Бэкенд - Редактировать конфигурацию бэкенда» > «SSH источников правил», введите SSH-аккаунт и SSH-пароль, выберите правильный OpenClash/Nikki и нажмите «Проверить источник правил».',
+      'Откройте «Настройки - Бэкенд - Редактировать конфигурацию бэкенда» > «SSH источников правил», введите SSH-аккаунт и SSH-пароль, выберите правильный OpenClash/Nikki/SingBox и нажмите «Проверить источник правил».',
     detailPrefix: 'Текущая ошибка:',
   },
 }
@@ -528,11 +530,47 @@ const sanitizeOpenWrtRuleSourceSshConfig = (config) => ({
   configured: Boolean(config.host && config.username && config.password),
 })
 
-const normalizeOpenWrtRuleSourceSshConfigInput = (input = {}) => {
+/**
+ * 判断 host 是否为本地 Loopback 或本机地址
+ * @param {string} host
+ * @returns {boolean}
+ */
+const isLocalHost = (host) => {
+  const normalizedHost = String(host || '').trim().toLowerCase()
+
+  if (
+    !normalizedHost ||
+    normalizedHost === 'localhost' ||
+    normalizedHost === '127.0.0.1' ||
+    normalizedHost === '::1' ||
+    normalizedHost === '0.0.0.0'
+  ) {
+    return true
+  }
+
+  if (net.isIPv4(normalizedHost) && normalizedHost.startsWith('127.')) {
+    return true
+  }
+
+  return false
+}
+
+/**
+ * 标准化 OpenWrt 规则源配置输入（自动兼容本地模式与旧字段）
+ * @param {Object} [input={}]
+ * @returns {Object}
+ */
+export const normalizeOpenWrtRuleSourceSshConfigInput = (input = {}) => {
+  const host = String(input.host || input.ruleSourceSshHost || '').trim()
   const port = Number.parseInt(String(input.port || input.ruleSourceSshPort || '22'), 10)
 
+  // 判定是否为本地模式
+  const isLocal = isLocalHost(host)
+
   return {
-    host: String(input.host || '').trim(),
+    isLocal,
+    filePath: String(input.filePath || input.ruleSourceFilePath || '').trim(),
+    host: isLocal ? '127.0.0.1' : host,
     port: Number.isFinite(port) && port > 0 ? port : 22,
     username: String(input.username || input.user || input.ruleSourceSshUsername || 'root').trim() || 'root',
     password: String(input.password || input.ruleSourceSshPassword || ''),
@@ -709,24 +747,7 @@ const dedupeStrings = (values) => [...new Set(values.map((value) => String(value
 
 const isRemoteYamlPath = (value) => /^\/\S+\.ya?ml$/i.test(String(value || '').trim())
 
-function extractRemoteYamlConfigPathsFromText(content) {
-  const candidates = []
-  const patterns = [
-    /(?:^|\s)(?:-f|--config|-config)\s+['"]?(\/[^\s'"]+\.ya?ml)['"]?(?=\s|$)/gi,
-    /(?:^|\s)(?:-f|--config|-config)=['"]?(\/[^\s'"]+\.ya?ml)['"]?(?=\s|$)/gi,
-    /['"]?(\/[^\s'"]+\.ya?ml)['"]?(?=\s|$)/gi,
-  ]
 
-  patterns.forEach((pattern) => {
-    for (const match of String(content || '').matchAll(pattern)) {
-      if (isRemoteYamlPath(match[1])) {
-        candidates.push(match[1])
-      }
-    }
-  })
-
-  return dedupeStrings(candidates)
-}
 
 function extractRemoteYamlConfigPathsFromUci(content) {
   const candidates = []
@@ -758,7 +779,6 @@ const isOpenClashOwnedPath = (value) =>
 
 const isNikkiProcessLine = (line) =>
   /\bnikki\b|\/nikki(?:\/|$)/i.test(String(line || ''))
-
 function extractNikkiYamlConfigPathsFromProcessList(content) {
   return dedupeStrings(
     String(content || '')
@@ -767,6 +787,12 @@ function extractNikkiYamlConfigPathsFromProcessList(content) {
       .flatMap((line) => extractRemoteYamlConfigPathsFromText(line))
       .filter((candidate) => !isOpenClashOwnedPath(candidate)),
   )
+}
+
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function isRemoteJsonPath(value) {
+  return /^\/.+\.json$/i.test(String(value || '').trim())
 }
 
 const setRuleRefreshState = (partial) => {
@@ -1118,7 +1144,22 @@ function extractRuleProviderEntriesFromContent(content) {
     .filter(Boolean)
 }
 
-const getNikkiRuleSourceConfigPathCandidates = async (client) => {
+const getNikkiRuleSourceConfigPathCandidates = async (client, config = {}) => {
+  const isLocal = Boolean(config.isLocal)
+
+  // 【本地模式】：直接返回 Mac 本地常见的 Nikki 配置路径（以及可能的 config.filePath）
+  if (isLocal) {
+    return dedupeStrings([
+      ...(config.filePath ? [config.filePath] : []),
+      '/usr/local/etc/nikki/config.yaml',
+      '/usr/local/etc/nikki/config.yml',
+      '/Users/liuzixin/.config/nikki/config.yaml',
+      './config.yaml',
+      './config.yml',
+    ])
+  }
+
+  // 【远程模式】：保持你原本强大的 ps 进程与 UCI 自动推导逻辑
   const processResult = await sshExec(client, 'ps ww || ps w || ps', {
     maxBuffer: 256 * 1024,
   }).catch(() => null)
@@ -1145,18 +1186,23 @@ const getNikkiRuleSourceConfigPathCandidates = async (client) => {
   ])
 }
 
-const detectNikkiRuleSourceFromOpenWrtClient = async (client) => {
-  const configPathCandidates = await getNikkiRuleSourceConfigPathCandidates(client)
+const detectNikkiRuleSourceFromOpenWrtClient = async (client, config = {}) => {
+  const isLocal = Boolean(config.isLocal)
+
+  // 1. ⚠️ 关键修复：必须把 config 传给候选路径获取函数，防止它误走 SSH 执行 ps 命令
+  const configPathCandidates = await getNikkiRuleSourceConfigPathCandidates(client, config)
   const checkedExistingPaths = []
 
   for (const configPath of configPathCandidates) {
-    if (!(await remoteFileExists(client, configPath))) {
+    // 2. 文件存在性检查（自动兼容 本地/SSH）
+    if (!(await fileExistsSafe(client, configPath, isLocal))) {
       continue
     }
 
     checkedExistingPaths.push(configPath)
 
-    const content = await readRemoteFile(client, configPath)
+    // 3. 读取文件内容（自动兼容 本地/SSH）
+    const content = await readFileSafe(client, configPath, isLocal)
     const providers = extractRuleProviderEntriesFromContent(content)
 
     if (providers.length === 0) {
@@ -1170,11 +1216,13 @@ const detectNikkiRuleSourceFromOpenWrtClient = async (client) => {
     }
   }
 
-  if (
-    checkedExistingPaths.length > 0 ||
+  // 4. ⚠️ 关键修复：本地模式 (isLocal) 直接跳过远程 OpenWrt 目录探测，严禁传入 null 的 client
+  const hasNikkiDir = !isLocal && client && (
     (await remoteFileExists(client, '/etc/config/nikki')) ||
     (await remotePathExists(client, '/etc/nikki'))
-  ) {
+  )
+
+  if (checkedExistingPaths.length > 0 || hasNikkiDir) {
     throw new Error(
       `Nikki detected, but no readable YAML with rule-providers was found${
         checkedExistingPaths.length > 0 ? `: ${checkedExistingPaths.join(', ')}` : ''
@@ -1188,50 +1236,158 @@ const detectNikkiRuleSourceFromOpenWrtClient = async (client) => {
 // 提取规则集（route.rule_set）的解析函数
 const extractSingBoxRuleSetEntriesFromContent = (content) => {
   try {
-    // 处理可能包含 JSON5/注释 的情况
-    const cleanContent = content.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '')
-    const config = JSON.parse(cleanContent)
-    const ruleSets = config?.route?.rule_set || []
+    if (content == null) return []
 
-    return ruleSets
-      .filter((item) => item.type === 'remote') // 过滤出远程规则集
-      .map((item) => ({
-        name: item.tag,
-        format: item.format || 'binary',
-        behavior: item.format === 'binary' ? 'srs' : 'json',
-        url: item.url || '',
-      }))
+    // 统一处理 Buffer / Uint8Array / String
+    let text
+
+    if (Buffer.isBuffer(content)) {
+      text = content.toString('utf8')
+    } else if (content instanceof Uint8Array) {
+      text = Buffer.from(content).toString('utf8')
+    } else if (typeof content === 'string') {
+      text = content
+    } else {
+      // 如果调用方本身已经传入解析后的对象
+      text = null
+    }
+
+    const config = text !== null
+      ? JSON.parse(text)
+      : content
+
+    const ruleSets = config?.route?.rule_set
+
+    if (!Array.isArray(ruleSets)) {
+      console.log(
+        '[singbox-parser] route.rule_set is not an array:',
+        typeof ruleSets
+      )
+      return []
+    }
+
+    const providers = ruleSets
+      .filter((item) => {
+        if (!item || typeof item !== 'object') return false
+
+        return (
+          item.type === 'remote' &&
+          Boolean(item.tag) &&
+          Boolean(item.url)
+        )
+      })
+      .map((item) => {
+        const format = item.format || 'source'
+
+        return {
+          name: item.tag,
+          format,
+          behavior: format === 'binary' ? 'srs' : 'json',
+          url: item.url,
+        }
+      })
+
+    console.log(
+      `[singbox-parser] route.rule_set found: ${ruleSets.length}, remote providers: ${providers.length}`
+    )
+
+    return providers
   } catch (error) {
+    console.error(
+      '[singbox-parser] Failed to parse sing-box config:',
+      error
+    )
+
     return []
   }
 }
 
 
 
+const fileExistsSafe = async (client, filePath, isLocal = false) => {
+  if (isLocal) {
+    try {
+      return fs.existsSync(filePath)
+    } catch {
+      return false
+    }
+  }
+  // 远程 SSH 检查逻辑
+  try {
+    await client.exec(`test -f "${filePath}"`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const readFileSafe = async (client, filePath, isLocal = false) => {
+  if (isLocal) {
+    try {
+      return fs.readFileSync(filePath, 'utf-8')
+    } catch (e) {
+      console.error(`[Local Read Error] Failed to read ${filePath}:`, e.message)
+      return ''
+    }
+  }
+  // 远程 SSH 读取逻辑
+  const result = await sshExec(client, `cat "${filePath}"`, { maxBuffer: 1024 * 1024 })
+  return result?.stdout || ''
+}
 
 // 候选配置文件路径表
-const getSingBoxRuleSourceConfigPathCandidates = async (client) => {
-  return [
-    '/etc/momo/run/config.json', // 👈 优先检测你当前的实际路径
+const getSingBoxRuleSourceConfigPathCandidates = async (client, config = {}) => {
+  const isLocal = Boolean(config.isLocal)
+
+  // 【本地模式】：直接返回 Mac 本地包含 GUI.for.SingBox 在内的候选路径
+  if (isLocal) {
+    const homeDir = os.homedir()
+    const gsfmDir = path.join(homeDir, 'Library/Application Support/GUI.for.SingBox')
+
+    return dedupeStrings([
+      ...(config.filePath ? [config.filePath] : []),
+      // GUI.for.SingBox 实际配置文件路径
+      path.join(gsfmDir, 'sing-box/config.json'),
+      path.join(gsfmDir, 'config.json'),
+      // 其他常见本地备用路径
+      path.join(homeDir, '.config/sing-box/config.json'),
+      '/usr/local/etc/sing-box/config.json',
+      './config.json',
+    ])
+  }
+
+  // 【远程模式】：保持原有进程解析与 OpenWrt/Momo 默认路径
+  const processResult = await sshExec(client, 'ps ww || ps w || ps', {
+    maxBuffer: 256 * 1024,
+  }).catch(() => null)
+  const processCandidates = extractSingBoxRuleSetEntriesFromContent(processResult?.stdout || '')
+
+  return dedupeStrings([
+    ...processCandidates,
+
+    '/etc/momo/run/config.json',
     '/var/etc/sing-box/config.json',
     '/etc/sing-box/config.json',
     '/etc/sing-box/main.json',
-  ]
+  ])
 }
 
 // sing-box 检测主入口
-const detectSingBoxRuleSourceFromOpenWrtClient = async (client) => {
-  const configPathCandidates = await getSingBoxRuleSourceConfigPathCandidates(client)
+const detectSingBoxRuleSourceFromOpenWrtClient = async (client, config = {}) => {
+  const isLocal = Boolean(config.isLocal)
+
+  // ⚠️ 确保第 2 个参数透传了 config
+  const configPathCandidates = await getSingBoxRuleSourceConfigPathCandidates(client, config)
   const checkedExistingPaths = []
 
   for (const configPath of configPathCandidates) {
-    if (!(await remoteFileExists(client, configPath))) {
+    if (!(await fileExistsSafe(client, configPath, isLocal))) {
       continue
     }
 
     checkedExistingPaths.push(configPath)
 
-    const content = await readRemoteFile(client, configPath)
+    const content = await readFileSafe(client, configPath, isLocal)
     const providers = extractSingBoxRuleSetEntriesFromContent(content)
 
     if (providers.length === 0) {
@@ -1245,12 +1401,13 @@ const detectSingBoxRuleSourceFromOpenWrtClient = async (client) => {
     }
   }
 
-  // 抛出检测异常提示
-  if (
-    checkedExistingPaths.length > 0 ||
+  // 抛出检测异常提示（仅在远程 SSH 模式下判定 Momo 特有目录）
+  const hasMomoDir = !isLocal && client && (
     (await remoteFileExists(client, '/etc/config/momo')) ||
     (await remotePathExists(client, '/etc/momo'))
-  ) {
+  )
+
+  if (checkedExistingPaths.length > 0 || hasMomoDir) {
     throw new Error(
       `sing-box/Momo detected, but no readable JSON with route.rule_set was found${
         checkedExistingPaths.length > 0 ? `: ${checkedExistingPaths.join(', ')}` : ''
@@ -1261,16 +1418,22 @@ const detectSingBoxRuleSourceFromOpenWrtClient = async (client) => {
   return null
 }
 
-const detectOpenClashRuleSourceFromOpenWrtClient = async (client) => {
-  if (!(await remoteFileExists(client, openClashUciConfigPath))) {
+const detectOpenClashRuleSourceFromOpenWrtClient = async (client, config = {}) => {
+  const isLocal = Boolean(config.isLocal)
+
+  // 1. 校验 OpenClash UCI 配置文件是否存在（兼容 本地/SSH）
+  if (!(await fileExistsSafe(client, openClashUciConfigPath, isLocal))) {
     return null
   }
 
-  const uciContent = await readRemoteFile(client, openClashUciConfigPath)
+  // 2. 读取 UCI 配置文件（兼容 本地/SSH）
+  const uciContent = await readFileSafe(client, openClashUciConfigPath, isLocal)
+
+  // 3. 解析实际使用的 config_path 路径
   const configPath = resolveOpenClashConfigPathFromUci(uciContent, {
     configDir: openClashConfigDir,
     uciConfigPath: openClashUciConfigPath,
-    pathApi: path.posix,
+    pathApi: isLocal ? path : path.posix, // 本地模式下根据当前系统环境解析路径
     preferExisting: false,
   })
 
@@ -1278,11 +1441,13 @@ const detectOpenClashRuleSourceFromOpenWrtClient = async (client) => {
     throw new Error('OpenClash detected, but option config_path is missing.')
   }
 
-  if (!(await remoteFileExists(client, configPath))) {
+  // 4. 校验规则配置文件是否存在（兼容 本地/SSH）
+  if (!(await fileExistsSafe(client, configPath, isLocal))) {
     throw new Error(`OpenClash config_path file does not exist: ${configPath}`)
   }
 
-  const content = await readRemoteFile(client, configPath)
+  // 5. 读取规则配置文件内容（兼容 本地/SSH）
+  const content = await readFileSafe(client, configPath, isLocal)
 
   return {
     plugin: 'openclash',
@@ -1291,7 +1456,11 @@ const detectOpenClashRuleSourceFromOpenWrtClient = async (client) => {
   }
 }
 
-const collectRuleSourceSnapshotsFromOpenWrtClient = async (client, requestedPlugin = 'auto') => {
+const collectRuleSourceSnapshotsFromOpenWrtClient = async (
+  client,
+  requestedPlugin = 'auto',
+  config = {},
+) => {
   const plugin = normalizeRuleSourcePlugin(requestedPlugin)
   const snapshots = []
   const errors = []
@@ -1303,7 +1472,8 @@ const collectRuleSourceSnapshotsFromOpenWrtClient = async (client, requestedPlug
 
   for (const [name, detector] of detectors) {
     try {
-      const snapshot = await detector(client)
+      // 将 config 作为第二个参数透传给具体插件的检测函数
+      const snapshot = await detector(client, config)
 
       if (snapshot) {
         snapshots.push(snapshot)
@@ -1323,10 +1493,16 @@ const collectRuleSourceSnapshotsFromOpenWrtClient = async (client, requestedPlug
   }
 }
 
-const detectRuleSourceFromOpenWrtClient = async (client, requestedPlugin = 'auto') => {
+const detectRuleSourceFromOpenWrtClient = async (
+  client,
+  requestedPlugin = 'auto',
+  config = {},
+) => {
+  // 把 config 往下传给 collectRuleSourceSnapshotsFromOpenWrtClient
   const { plugin, snapshots, errors } = await collectRuleSourceSnapshotsFromOpenWrtClient(
     client,
     requestedPlugin,
+    config,
   )
 
   if (snapshots.length > 0) {
@@ -1342,12 +1518,16 @@ const detectRuleSourceFromOpenWrtClient = async (client, requestedPlugin = 'auto
     throw new Error(errors.map((entry) => `${entry.plugin}: ${entry.message}`).join('; '))
   }
 
+  // 动态匹配报错的主机文案（本地 vs 远程）
+  const targetHost = config.isLocal ? 'local host' : 'OpenWrt host'
+
   throw new Error(
     plugin === 'auto'
-      ? 'OpenClash or Nikki was not detected on the OpenWrt host.'
-      : `${plugin} was not detected on the OpenWrt host.`,
+      ? `OpenClash, Nikki or sing-box was not detected on the ${targetHost}.`
+      : `${plugin} was not detected on the ${targetHost}.`,
   )
 }
+
 
 const getOpenWrtRuleSourceSnapshot = async (options = {}) => {
   const config = options.config || readOpenWrtRuleSourceSshConfig()
@@ -1356,8 +1536,14 @@ const getOpenWrtRuleSourceSnapshot = async (options = {}) => {
     return null
   }
 
+  // 【关掉 SSH】：如果 host 是 127.0.0.1 / localhost，直接不建 SSH 链接，传入 config 跑本地检测
+  if (config.isLocal) {
+    return await detectRuleSourceFromOpenWrtClient(null, config.plugin, config)
+  }
+
+  // 远程 SSH 模式（保持不变）
   return await withOpenWrtSshClient(config, (client) =>
-    detectRuleSourceFromOpenWrtClient(client, config.plugin),
+    detectRuleSourceFromOpenWrtClient(client, config.plugin, config),
   )
 }
 
@@ -4644,9 +4830,9 @@ app.put('/api/openwrt-rule-source/config', (req, res) => {
 app.post('/api/openwrt-rule-source/detect', async (req, res) => {
   const config = req.body?.config
     ? {
-        ...normalizeOpenWrtRuleSourceSshConfigInput(req.body.config),
-        configured: true,
-      }
+      ...normalizeOpenWrtRuleSourceSshConfigInput(req.body.config),
+      configured: true,
+    }
     : readOpenWrtRuleSourceSshConfig()
 
   try {
@@ -4656,7 +4842,7 @@ app.post('/api/openwrt-rule-source/detect', async (req, res) => {
     })
 
     if (!snapshot) {
-      throw new Error('OpenWrt SSH rule source is not configured.')
+      throw new Error('OpenWrt rule source is not configured.')
     }
 
     res.json({
@@ -5211,7 +5397,7 @@ export {
   deleteProxyDomainRuleInYamlContent as deleteProxyDomainRuleInYamlContentForTesting,
   extractNikkiYamlConfigPathsFromProcessList as extractNikkiYamlConfigPathsFromProcessListForTesting,
   db,
-  extractRemoteYamlConfigPathsFromText as extractRemoteYamlConfigPathsFromTextForTesting,
+
   extractRemoteYamlConfigPathsFromUci as extractRemoteYamlConfigPathsFromUciForTesting,
   getRequestAccessAuthStatus as getRequestAccessAuthStatusForTesting,
   getWritableProxyDomainRulePath as getWritableProxyDomainRulePathForTesting,

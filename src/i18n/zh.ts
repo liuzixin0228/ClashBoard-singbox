@@ -273,7 +273,7 @@ const zh: LANG_MESSAGE = {
   ruleSourceDetectedShort: '已检测 {plugin}，{count} 个{availablePlugins}',
   ruleSourceDetectedAvailable: '，可用 {plugins}',
   ruleSourceSyncSshRequired:
-    '规则源同步需要先配置 SSH 账号和密码，并确保规则源检测通过。请在“设置 - 后端 - 修改后端配置”的“规则源 SSH”中填写 SSH 账号、SSH 密码，选择正确的 OpenClash/Nikki 后点击“检测规则源”。',
+    '规则源同步需要先配置 SSH 账号和密码，并确保规则源检测通过。请在“设置 - 后端 - 修改后端配置”的“规则源 SSH”中填写 SSH 账号、SSH 密码，选择正确的 OpenClash/Nikki/SingBox 后点击“检测规则源”。',
   backendConnectionFailed: '后端连接失败，请检查配置信息',
   backendConfigSaved: '后端配置保存成功',
   saveFailed: '保存失败',

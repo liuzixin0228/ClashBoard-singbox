@@ -5,8 +5,12 @@ import { fetchServerApi } from '@/store/auth'
 import type { Rule, RuleProvider } from '@/types'
 import { useStorage } from '@vueuse/core'
 import { computed, ref } from 'vue'
+// 增加导入 normalizeSingboxRules 和 normalizeSingboxProviders
+import { normalizeSingboxProviders, normalizeSingboxRules } from '@/api/adapters'
 
 export type RuleRefreshPhase = 'idle' | 'provider' | 'cache'
+
+export const isSingboxKernel = ref(false)
 
 export type RuleRefreshState = {
   runId: number
@@ -183,7 +187,10 @@ export const visibleRuleProviderList = computed(() => {
       const rightReferencedOrder = referencedRuleProviderOrderIndexMap.value.get(right.name)
 
       if (leftReferencedOrder !== undefined || rightReferencedOrder !== undefined) {
-        return (leftReferencedOrder ?? Number.MAX_SAFE_INTEGER) - (rightReferencedOrder ?? Number.MAX_SAFE_INTEGER)
+        return (
+          (leftReferencedOrder ?? Number.MAX_SAFE_INTEGER) -
+          (rightReferencedOrder ?? Number.MAX_SAFE_INTEGER)
+        )
       }
 
       const leftOrder = ruleProviderOrderIndexMap.value.get(left.name)
@@ -252,21 +259,41 @@ export const fetchRules = async () => {
   const { data: ruleData } = await fetchRulesAPI()
   const { data: providerData } = await fetchRuleProvidersAPI()
 
-  rules.value = ruleData.rules.map((rule) => {
-    const proxy = rule.proxy
-    const proxyName = proxy.startsWith('route(') ? proxy.substring(6, proxy.length - 1) : proxy
+  const rawRules = ruleData?.rules || []
 
-    return {
-      ...rule,
-      proxy: proxyName,
-    }
-  })
-  ruleProviderList.value = Object.values(providerData.providers)
+  // 1. 判断是否为 sing-box 内核 (sing-box 规则包含 outbound 或 rule_set 等特有属性)
+  isSingboxKernel.value = rawRules.some(
+    (r: Record<string, unknown>) => 'outbound' in r || 'rule_set' in r,
+  )
+
+  // 2. 根据内核类型分别解析
+  if (isSingboxKernel.value) {
+    // sing-box 走适配器逻辑
+    rules.value = normalizeSingboxRules(rawRules)
+    ruleProviderList.value = Object.values(normalizeSingboxProviders(providerData?.providers || {}))
+  } else {
+    // 原有 Clash / Nikki 的标准解析逻辑保持不变
+    rules.value = rawRules.map((rule) => {
+      const proxy = rule.proxy || ''
+      const proxyName = proxy.startsWith('route(') ? proxy.substring(6, proxy.length - 1) : proxy
+
+      return {
+        ...rule,
+        proxy: proxyName,
+      }
+    })
+    ruleProviderList.value = Object.values(providerData?.providers || {})
+  }
 }
 
 export const fetchRuleProviders = async () => {
   const { data: providerData } = await fetchRuleProvidersAPI()
-  ruleProviderList.value = Object.values(providerData.providers)
+
+  if (isSingboxKernel.value) {
+    ruleProviderList.value = Object.values(normalizeSingboxProviders(providerData?.providers || {}))
+  } else {
+    ruleProviderList.value = Object.values(providerData?.providers || {})
+  }
 }
 
 export const updateRuleProviderCache = async () => {
@@ -328,7 +355,9 @@ export const startBackgroundRuleRefresh = async (
 
   if (!response.ok) {
     const errorBody = (await response.json().catch(() => null)) as { message?: string } | null
-    throw new Error(errorBody?.message || `Failed to start background rule refresh: ${response.status}`)
+    throw new Error(
+      errorBody?.message || `Failed to start background rule refresh: ${response.status}`,
+    )
   }
 
   return (await response.json()) as {
@@ -360,7 +389,9 @@ export const cancelBackgroundRuleRefresh = async () => {
 
   if (!response.ok) {
     const errorBody = (await response.json().catch(() => null)) as { message?: string } | null
-    throw new Error(errorBody?.message || `Failed to cancel background rule refresh: ${response.status}`)
+    throw new Error(
+      errorBody?.message || `Failed to cancel background rule refresh: ${response.status}`,
+    )
   }
 
   return (await response.json()) as {
@@ -489,18 +520,26 @@ export const searchRuleByQuery = async () => {
       },
       body: JSON.stringify({
         query,
-        rules: rules.value.map((rule) => ({
-          type: rule.type,
-          payload: rule.payload,
-          proxy: rule.proxy,
-          index: rule.index,
-          disabled: rule.disabled,
-          extra: rule.extra
-            ? {
-                disabled: rule.extra.disabled,
-              }
-            : undefined,
-        })),
+        // 适配后端：将 sing-box 的字段格式规整为后端能识别的 Clash 规范
+        rules: rules.value.map((rule) => {
+          // 1. 将 type 转成大写并规范化（如 domain_suffix -> DOMAIN-SUFFIX, rule_set -> RULE-SET）
+          let rawType = rule.type.toUpperCase()
+          if (rawType === 'RULE_SET') rawType = 'RuleSet'
+          if (rawType.includes('_')) rawType = rawType.replace('_', '-')
+
+          return {
+            type: rawType,
+            payload: rule.payload,
+            proxy: rule.proxy,
+            index: rule.index,
+            disabled: rule.disabled,
+            extra: rule.extra
+              ? {
+                  disabled: rule.extra.disabled,
+                }
+              : undefined,
+          }
+        }),
       }),
     })
 
@@ -552,7 +591,9 @@ export const searchRuleByQuery = async () => {
         totalRules: item.totalRules,
         matches: item.matches,
         linkedRules: rules.value.filter(
-          (rule) => rule.type === 'RuleSet' && rule.payload === item.name,
+          (rule) =>
+            (rule.type.toLowerCase() === 'ruleset' || rule.type.toLowerCase() === 'rule_set') &&
+            rule.payload === item.name,
         ),
       }))
       .filter((item) => item.linkedRules.length > 0)
