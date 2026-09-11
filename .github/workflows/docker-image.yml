@@ -36,9 +36,10 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/liandu2024/ange-clashboard
+          # 👈 改成了你的 GitHub 仓库路径 (会自动展开为 ghcr.io/liuzixin0228/clashboard-singbox)
+          images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=tag
             type=sha
 
