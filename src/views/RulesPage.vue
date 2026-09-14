@@ -83,8 +83,8 @@
           </template>
           <template v-else>
             <RuleCard
-              v-for="(rule, idx) in renderRules"
-              :key="`rule-${rule.index ?? idx}-${rule.type}-${rule.payload}-${rule.proxy}`"
+              v-for="rule in renderRules"
+              :key="`${rule.type}-${rule.payload}-${rule.proxy}`"
               :rule="rule"
               :index="rules.indexOf(rule) + 1"
             />
@@ -99,9 +99,9 @@
       :data="renderRules"
       :size="84"
     >
-      <template #default="{ item: rule, index: idx }: { item: Rule; index: number }">
+      <template #default="{ item: rule }: { item: Rule }">
         <RuleCard
-          :key="`v-rule-${rule.index ?? idx}-${rule.type}-${rule.payload}-${rule.proxy}`"
+          :key="`${rule.type}-${rule.payload}-${rule.proxy}`"
           :rule="rule"
           :index="rules.indexOf(rule) + 1"
         />
@@ -132,7 +132,6 @@ import {
   isRuleLookupLoading,
   isRuleLookupQuery,
   isRuleRefreshRunning,
-  isSingboxKernel, // 集成点：读取内核标记
   renderRules,
   renderRulesProvider,
   ruleCacheRefreshCount,
@@ -160,9 +159,6 @@ const isRulesTabHydrated = ref(false)
 const { t } = useI18n()
 
 const syncRuleCacheStats = async () => {
-  // 集成点：sing-box 内核跳过后端 cache 轮询
-  if (isSingboxKernel.value) return
-
   try {
     const stats = await fetchRuleProviderCacheStats()
     applyRuleProviderCacheStats(stats)
@@ -172,8 +168,7 @@ const syncRuleCacheStats = async () => {
 }
 
 const ensureRuleCacheBootstrap = async () => {
-  // 集成点：如果是 sing-box 内核，直接跳过本地规则集缓存构建
-  if (isSingboxKernel.value || autoRuleCacheBootstrapAttempted.value) {
+  if (autoRuleCacheBootstrapAttempted.value) {
     return
   }
 
@@ -222,8 +217,6 @@ const initializeRulesPage = async () => {
 void initializeRulesPage()
 
 const statsPollingTimer = setInterval(() => {
-  if (isSingboxKernel.value) return
-
   if (
     rulesTabShow.value === RULE_TAB_TYPE.PROVIDER ||
     isRuleCacheUpdating.value ||
@@ -257,11 +250,6 @@ watch(
   }),
   ({ hasReferencedProviders, isHydrated, currentTab }) => {
     if (!isHydrated) {
-      return
-    }
-
-    // 集成点：如果是 sing-box，且确实获取到了 ruleProviderList，则不强制跳回 RULES 标签
-    if (isSingboxKernel.value && ruleProviderList.value.length > 0) {
       return
     }
 

@@ -1238,72 +1238,56 @@ const extractSingBoxRuleSetEntriesFromContent = (content) => {
   try {
     if (content == null) return []
 
-    // 统一处理 Buffer / Uint8Array / String
-    let text
-
+    let text = ''
     if (Buffer.isBuffer(content)) {
       text = content.toString('utf8')
     } else if (content instanceof Uint8Array) {
       text = Buffer.from(content).toString('utf8')
     } else if (typeof content === 'string') {
       text = content
-    } else {
-      // 如果调用方本身已经传入解析后的对象
-      text = null
+    } else if (typeof content === 'object') {
+      text = JSON.stringify(content)
     }
 
-    const config = text !== null
-      ? JSON.parse(text)
-      : content
+    if (!text.trim()) return []
 
-    const ruleSets = config?.route?.rule_set
+    // 清理注释
 
-    if (!Array.isArray(ruleSets)) {
-      console.log(
-        '[singbox-parser] route.rule_set is not an array:',
-        typeof ruleSets
-      )
-      return []
-    }
+    const config = JSON.parse(text)
 
-    const providers = ruleSets
+    // 兼容 route.rule_set 或顶层 rule_set
+    const ruleSets = config?.route?.rule_set || config?.rule_set
+    if (!Array.isArray(ruleSets)) return []
+
+    return ruleSets
       .filter((item) => {
         if (!item || typeof item !== 'object') return false
-
-        return (
-          item.type === 'remote' &&
-          Boolean(item.tag) &&
-          Boolean(item.url)
-        )
+        const hasTag = Boolean(item.tag || item.name)
+        const hasUrl = Boolean(item.url)
+        return hasTag && hasUrl
       })
       .map((item) => {
-        const format = item.format || 'source'
+        const tag = item.tag || item.name
+        const url = item.url
+        const isBinary = item.format === 'binary' || url.endsWith('.srs')
+        const format = item.format || (isBinary ? 'binary' : 'source')
 
         return {
-          name: item.tag,
+          name: tag,
           format,
-          behavior: format === 'binary' ? 'srs' : 'json',
-          url: item.url,
+          behavior: isBinary ? 'srs' : 'json',
+          url,
         }
       })
-
-    console.log(
-      `[singbox-parser] route.rule_set found: ${ruleSets.length}, remote providers: ${providers.length}`
-    )
-
-    return providers
   } catch (error) {
-    console.error(
-      '[singbox-parser] Failed to parse sing-box config:',
-      error
-    )
-
+    console.error('[singbox-parser] JSON parse error:', error.message)
     return []
   }
 }
 
 
 
+// 1. 安全检查远程文件是否存在（不依赖严格的 exit code 异常抛出）
 const fileExistsSafe = async (client, filePath, isLocal = false) => {
   if (isLocal) {
     try {
@@ -1312,60 +1296,83 @@ const fileExistsSafe = async (client, filePath, isLocal = false) => {
       return false
     }
   }
-  // 远程 SSH 检查逻辑
+
   try {
-    await client.exec(`test -f "${filePath}"`)
-    return true
-  } catch {
+    // 改用更直观的 shell 命令：如果文件存在且可读，直接打印 1，否则不打印
+    const result = await sshExec(client, `[ -f "${filePath}" ] && echo "1" || echo "0"`, {
+      maxBuffer: 64 * 1024,
+    }).catch(() => null)
+
+    const output = (result?.stdout || '').trim()
+    return output === '1'
+  } catch (e) {
+    console.error(`[SSH File Check Error] ${filePath}:`, e.message)
     return false
   }
 }
 
+// 2. 安全读取远程文件内容
 const readFileSafe = async (client, filePath, isLocal = false) => {
   if (isLocal) {
     try {
       return fs.readFileSync(filePath, 'utf-8')
-    } catch (e) {
-      console.error(`[Local Read Error] Failed to read ${filePath}:`, e.message)
+    } catch {
       return ''
     }
   }
-  // 远程 SSH 读取逻辑
-  const result = await sshExec(client, `cat "${filePath}"`, { maxBuffer: 1024 * 1024 })
-  return result?.stdout || ''
+
+  try {
+    const result = await sshExec(client, `cat "${filePath}"`, { maxBuffer: 1024 * 1024 })
+    const rawOutput = result?.stdout || result || ''
+    // 确保只取内容主体，去掉首尾多余的空白
+    return typeof rawOutput === 'string' ? rawOutput.trim() : String(rawOutput)
+  } catch (e) {
+    console.error(`[SSH Read Error] ${filePath}:`, e.message)
+    return ''
+  }
 }
+
+
 
 // 候选配置文件路径表
 const getSingBoxRuleSourceConfigPathCandidates = async (client, config = {}) => {
   const isLocal = Boolean(config.isLocal)
 
-  // 【本地模式】：直接返回 Mac 本地包含 GUI.for.SingBox 在内的候选路径
+  // 【本地模式】：Mac 本地运行 GUI.for.SingBox
   if (isLocal) {
     const homeDir = os.homedir()
     const gsfmDir = path.join(homeDir, 'Library/Application Support/GUI.for.SingBox')
 
     return dedupeStrings([
       ...(config.filePath ? [config.filePath] : []),
-      // GUI.for.SingBox 实际配置文件路径
       path.join(gsfmDir, 'sing-box/config.json'),
       path.join(gsfmDir, 'config.json'),
-      // 其他常见本地备用路径
       path.join(homeDir, '.config/sing-box/config.json'),
       '/usr/local/etc/sing-box/config.json',
       './config.json',
     ])
   }
 
-  // 【远程模式】：保持原有进程解析与 OpenWrt/Momo 默认路径
+  // 【远程模式】：连接家里的 OpenWrt 路由器
   const processResult = await sshExec(client, 'ps ww || ps w || ps', {
     maxBuffer: 256 * 1024,
   }).catch(() => null)
-  const processCandidates = extractSingBoxRuleSetEntriesFromContent(processResult?.stdout || '')
 
+  const stdout = processResult?.stdout || ''
+
+  // 1. 从进程命令中动态捕获 -D 参数路径（例如你看到的 -D /etc/momo/run）
+  const dataDirMatch = stdout.match(/-D\s+([^\s]+)/)
+  const dynamicDirConfig = dataDirMatch ? `${dataDirMatch[1].replace(/\/+$/, '')}/config.json` : null
+
+  // 2. 捕获显式指定的 -c 或 --config 路径
+  const configMatch = stdout.match(/(?:-c|--config)\s+([^\s]+\.json)/i)
+  const explicitConfig = configMatch?.[1] || null
+
+  // 3. 返回完整的候选路径列表（将你确定的 /etc/momo/run/config.json 置顶）
   return dedupeStrings([
-    ...processCandidates,
-
     '/etc/momo/run/config.json',
+    ...(dynamicDirConfig ? [dynamicDirConfig] : []),
+    ...(explicitConfig ? [explicitConfig] : []),
     '/var/etc/sing-box/config.json',
     '/etc/sing-box/config.json',
     '/etc/sing-box/main.json',
