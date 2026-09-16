@@ -19,9 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
+      # 1. 移除 setup-qemu-action（如果只构建 amd64 镜像，不需要 QEMU 模拟器，可大幅提升构建速度并节省内存）
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -36,7 +34,6 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # 👈 改成了你的 GitHub 仓库路径 (会自动展开为 ghcr.io/liuzixin0228/clashboard-singbox)
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -52,5 +49,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 2. 增加 Build-Args 给 Node 编译器分配更多内存（防止前端打包内存溢出）
+          build-args: |
+            NODE_OPTIONS=--max-old-space-size=4096
           cache-from: type=gha
           cache-to: type=gha,mode=max
