@@ -58,48 +58,6 @@ export const ruleProviderOrderList = ref<string[]>([])
 export const ruleCacheRefreshCount = ref(0)
 export const isRuleCacheUpdating = ref(false)
 export const ruleRefreshState = ref<RuleRefreshState>(createDefaultRuleRefreshState())
-export const isRuleLookupLoading = ref(false)
-export const ruleLookupError = ref('')
-export const ruleLookupResults = ref<
-  {
-    providerName: string
-    behavior: string
-    format: string
-    url: string
-    totalRules: number
-    matches: {
-      line: number
-      value: string
-      mode: string
-      raw: string
-    }[]
-    linkedRules: Rule[]
-  }[]
->([])
-export const ruleLookupDirectRules = ref<Rule[]>([])
-export const ruleLookupUnsupported = ref<
-  {
-    name: string
-    kind: string
-    behavior: string
-    format: string
-    url: string
-    status: string
-  }[]
->([])
-export const ruleLookupLiveErrors = ref<
-  {
-    name: string
-    url: string
-    message: string
-  }[]
->([])
-let latestRuleLookupRequestId = 0
-export const isRuleLookupQuery = computed(() => {
-  const value = rulesFilter.value.trim()
-
-  return value !== '' && !value.includes(' ') && !value.includes('|')
-})
 
 export const renderRules = computed(() => {
   const rulesFilterValue = rulesFilter.value.split(' ').map((f) => f.toLowerCase().trim())
@@ -204,28 +162,13 @@ export const visibleRuleProviderList = computed(() => {
     })
 })
 
-const isRuleEnabled = (rule: Rule) => {
+export const isRuleEnabled = (rule: Rule) => {
   if (rule.extra) {
     return !rule.extra.disabled
   }
 
   return !rule.disabled
 }
-
-export const ruleLookupFallbackRule = computed(() => {
-  const enabledRules = rules.value.filter(isRuleEnabled)
-
-  for (let index = enabledRules.length - 1; index >= 0; index--) {
-    const rule = enabledRules[index]
-    const normalizedType = rule.type.toLowerCase()
-
-    if (normalizedType === 'match' || normalizedType === 'final') {
-      return rule
-    }
-  }
-
-  return null
-})
 
 export const isRuleRefreshRunning = computed(() => {
   return ruleRefreshState.value.isRefreshing
@@ -484,150 +427,3 @@ export const applyRuleProviderCacheStats = (stats: {
   isRuleCacheUpdating.value = false
 }
 
-export const searchRuleByQuery = async () => {
-  const requestId = ++latestRuleLookupRequestId
-
-  if (!isRuleLookupQuery.value) {
-    ruleLookupResults.value = []
-    ruleLookupDirectRules.value = []
-    ruleLookupUnsupported.value = []
-    ruleLookupLiveErrors.value = []
-    ruleLookupError.value = ''
-    isRuleLookupLoading.value = false
-    return
-  }
-
-  const query = rulesFilter.value.trim()
-
-  if (!query) {
-    ruleLookupResults.value = []
-    ruleLookupDirectRules.value = []
-    ruleLookupUnsupported.value = []
-    ruleLookupLiveErrors.value = []
-    ruleLookupError.value = ''
-    isRuleLookupLoading.value = false
-    return
-  }
-
-  isRuleLookupLoading.value = true
-  ruleLookupError.value = ''
-
-  try {
-    const response = await fetchServerApi('/api/rule-provider-search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        // 适配后端：将 sing-box 的字段格式规整为后端能识别的 Clash 规范
-        rules: rules.value.map((rule) => {
-          // 1. 将 type 转成大写并规范化（如 domain_suffix -> DOMAIN-SUFFIX, rule_set -> RULE-SET）
-          let rawType = rule.type.toUpperCase()
-          if (rawType === 'RULE_SET') rawType = 'RuleSet'
-          if (rawType.includes('_')) rawType = rawType.replace('_', '-')
-
-          return {
-            type: rawType,
-            payload: rule.payload,
-            proxy: rule.proxy,
-            index: rule.index,
-            disabled: rule.disabled,
-            extra: rule.extra
-              ? {
-                  disabled: rule.extra.disabled,
-                }
-              : undefined,
-          }
-        }),
-      }),
-    })
-
-    if (!response.ok) {
-      const errorBody = (await response.json().catch(() => null)) as { message?: string } | null
-      throw new Error(errorBody?.message || `Failed to search rule cache: ${response.status}`)
-    }
-
-    const data = (await response.json()) as {
-      matches: {
-        name: string
-        behavior: string
-        format: string
-        url: string
-        totalRules: number
-        matches: {
-          line: number
-          value: string
-          mode: string
-          raw: string
-        }[]
-      }[]
-      directRuleIndexes: number[]
-      unsupported: {
-        name: string
-        kind: string
-        behavior: string
-        format: string
-        url: string
-        status: string
-      }[]
-      errors: {
-        name: string
-        url: string
-        message: string
-      }[]
-    }
-
-    if (requestId !== latestRuleLookupRequestId || rulesFilter.value.trim() !== query) {
-      return
-    }
-
-    ruleLookupResults.value = data.matches
-      .map((item) => ({
-        providerName: item.name,
-        behavior: item.behavior,
-        format: item.format,
-        url: item.url,
-        totalRules: item.totalRules,
-        matches: item.matches,
-        linkedRules: rules.value.filter(
-          (rule) =>
-            (rule.type.toLowerCase() === 'ruleset' || rule.type.toLowerCase() === 'rule_set') &&
-            rule.payload === item.name,
-        ),
-      }))
-      .filter((item) => item.linkedRules.length > 0)
-      .sort((prev, next) => {
-        const prevIndex = Math.min(...prev.linkedRules.map((rule) => rule.index))
-        const nextIndex = Math.min(...next.linkedRules.map((rule) => rule.index))
-
-        const safePrevIndex = Number.isFinite(prevIndex) ? prevIndex : Number.MAX_SAFE_INTEGER
-        const safeNextIndex = Number.isFinite(nextIndex) ? nextIndex : Number.MAX_SAFE_INTEGER
-
-        if (safePrevIndex !== safeNextIndex) {
-          return safePrevIndex - safeNextIndex
-        }
-
-        return prev.providerName.localeCompare(next.providerName)
-      })
-    ruleLookupDirectRules.value = rules.value.filter((rule) =>
-      data.directRuleIndexes.includes(rule.index),
-    )
-    ruleLookupUnsupported.value = data.unsupported
-    ruleLookupLiveErrors.value = data.errors
-  } catch (error) {
-    if (requestId !== latestRuleLookupRequestId || rulesFilter.value.trim() !== query) {
-      return
-    }
-
-    ruleLookupResults.value = []
-    ruleLookupDirectRules.value = []
-    ruleLookupUnsupported.value = []
-    ruleLookupLiveErrors.value = []
-    ruleLookupError.value = error instanceof Error ? error.message : String(error)
-  } finally {
-    if (requestId === latestRuleLookupRequestId) {
-      isRuleLookupLoading.value = false
-    }
-  }
-}
