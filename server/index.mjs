@@ -1,5 +1,5 @@
 import express from 'express'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -4993,23 +4993,192 @@ const collectReferencedRuleSetNames = (controllerRules) => {
   return [...names]
 }
 
+// 读取本机 sing-box 配置(GUI.for.SingBox / 标准路径),解析失败返回 null
+const findLocalSingBoxConfig = () => {
+  const homeDir = os.homedir()
+  const candidates = [
+    process.env.ZASHBOARD_SINGBOX_CONFIG,
+    path.join(homeDir, 'Library/Application Support/GUI.for.SingBox/sing-box/config.json'),
+    path.join(homeDir, '.config/sing-box/config.json'),
+    '/usr/local/etc/sing-box/config.json',
+    '/etc/sing-box/config.json',
+  ].filter(Boolean)
+
+  for (const configPath of candidates) {
+    try {
+      if (!fs.existsSync(configPath)) continue
+      return JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    } catch {
+      // 配置不可读就换下一个候选路径
+    }
+  }
+
+  return null
+}
+
+// 判断域名会走哪个 DNS 服务器:按 dns.rules 顺序匹配,回落 dns.final。
+// 支持 domain/domain_suffix/domain_keyword/query_type/rule_set 条件;
+// clash_mode 依赖客户端状态,无法预判时跳过该条。
+const resolveDnsRouteInfo = (lookup, config, srsMatchMap, orphanMatch = null) => {
+  const dns = config?.dns
+
+  if (!dns || !Array.isArray(dns.servers) || dns.servers.length === 0) {
+    return null
+  }
+
+  const serverByTag = new Map(dns.servers.map((server) => [server.tag, server]))
+  const describeServer = (tag) => {
+    const server = serverByTag.get(tag)
+
+    if (!server) {
+      return { server: tag, protocol: '', address: '', detour: '' }
+    }
+
+    return {
+      server: tag,
+      protocol: String(server.type || ''),
+      address: String(server.server || server.address || ''),
+      detour: String(server.detour || ''),
+    }
+  }
+
+  const rules = Array.isArray(dns.rules) ? dns.rules : []
+
+  const resolveOnce = (skipFakeip) => {
+    for (const rule of rules) {
+      if (!rule || typeof rule !== 'object') continue
+
+      if (rule.clash_mode) {
+        // direct/global 模式依赖客户端状态,预览时无法判定,跳过
+        continue
+      }
+
+      if (skipFakeip && rule.server && serverByTag.get(rule.server)?.type === 'fakeip') {
+        continue
+      }
+
+      if (
+        Array.isArray(rule.query_type) &&
+        !rule.query_type.some((t) => String(t).toUpperCase() === 'A')
+      ) {
+        continue
+      }
+
+      if (Array.isArray(rule.domain)) {
+        if (!rule.domain.includes(lookup.value)) continue
+      } else if (Array.isArray(rule.domain_suffix)) {
+        if (
+          !rule.domain_suffix.some(
+            (suffix) => lookup.value === suffix || lookup.value.endsWith(`.${suffix}`),
+          )
+        )
+          continue
+      } else if (Array.isArray(rule.domain_keyword)) {
+        if (!rule.domain_keyword.some((keyword) => lookup.value.includes(keyword))) continue
+      } else if (Array.isArray(rule.rule_set)) {
+        const allMatched = rule.rule_set.every(
+          (name) => srsMatchMap.get(name)?.hit === true || orphanMatch?.hit === true,
+        )
+
+        if (!allMatched) continue
+      }
+
+      if (rule.action === 'reject') {
+        return { rejected: true, server: '', protocol: '', address: '', detour: '' }
+      }
+
+      if (rule.action === 'route' && rule.server) {
+        return describeServer(rule.server)
+      }
+    }
+
+    if (dns.final) {
+      return describeServer(dns.final)
+    }
+
+    return null
+  }
+
+  const primary = resolveOnce(false)
+
+  if (!primary || primary.rejected) {
+    return primary
+  }
+
+  // fakeip 模式下客户端拿到的是假 IP,真实解析走上游:再按"跳过 fakeip"求值一次
+  if (primary.protocol === 'fakeip') {
+    const realServer = resolveOnce(true)
+
+    return { ...primary, fakeip: true, realServer: realServer && !realServer.rejected ? realServer : null }
+  }
+
+  return primary
+}
+
 // .srs 二进制规则集预匹配:evaluateRoutePenetrationRules 是同步求值,
 // 异步的二进制匹配在进入求值前先算好,以 name → {hit, error} 传入。
+// 运行中内核的规则集可能与磁盘配置快照不一致(缓存里没有的名字):
+// 从同前缀(geosite-/geoip-)的已缓存提供者的 URL 推导出下载地址再匹配。
+const deriveMissingSrsUrl = (name, cachedProviders) => {
+  const prefixMatch = String(name || '').match(/^(geosite|geoip)-/i)
+
+  if (!prefixMatch) {
+    return ''
+  }
+
+  const prefix = prefixMatch[0]
+  const suffix = String(name).slice(prefix.length)
+
+  if (!/^[a-z0-9-]+$/i.test(suffix)) {
+    return ''
+  }
+
+  const donor = cachedProviders.find(
+    (provider) =>
+      provider &&
+      provider.name &&
+      provider.name.startsWith(prefix) &&
+      provider.source_url &&
+      provider.source_url.includes(provider.name.slice(prefix.length)),
+  )
+
+  if (!donor) {
+    return ''
+  }
+
+  const donorSuffix = donor.name.slice(prefix.length)
+
+  return normalizeRuleProviderUrl(donor.source_url.replace(donorSuffix, suffix))
+}
+
 const buildSrsMatchMap = async (controllerRules, target) => {
   const names = collectReferencedRuleSetNames(controllerRules)
   const map = new Map()
+  const cachedProviders = getCachedRuleProviderStatement.all()
 
   await Promise.all(
     names.map(async (name) => {
       const cachedProvider = getCachedRuleProviderByNameStatement.get(name)
 
-      if (!cachedProvider) return
+      if (!cachedProvider) {
+        // 缓存缺失时按同前缀 URL 模板推导(仅对 .srs 二进制有意义)
+        const derivedUrl = deriveMissingSrsUrl(name, cachedProviders)
+
+        if (!derivedUrl) {
+          return
+        }
+
+        try {
+          map.set(name, await matchSrsRuleSetWithLocalBinary(name, derivedUrl, target))
+        } catch (error) {
+          map.set(name, { hit: false, error: getErrorMessage(error) })
+        }
+        return
+      }
 
       if (String(cachedProvider.behavior || '').toLowerCase() !== 'srs') return
 
-      const url =
-        normalizeRuleProviderUrl(cachedProvider.source_url) ||
-        normalizeRuleProviderUrl(cachedProvider.name)
+      const url = normalizeRuleProviderUrl(cachedProvider.source_url)
 
       if (!url) {
         map.set(name, { hit: false, error: 'srs source url unknown' })
@@ -5024,10 +5193,43 @@ const buildSrsMatchMap = async (controllerRules, target) => {
     }),
   )
 
-  return map
+  // 用户改过 rule_set tag 而内核没重启时,新 tag(缓存缺失)对应的规则集文件
+  // 其实已在缓存里(挂在旧 tag 名下)。恰好只有一个"当前规则未引用的孤儿"时,
+  // 用它补位匹配;多于一个则无法定位,保持三态。
+  const orphanCandidates = names.length
+    ? cachedProviders.filter(
+        (provider) =>
+          String(provider.behavior || '').toLowerCase() === 'srs' &&
+          provider.source_url &&
+          !names.includes(provider.name),
+      )
+    : []
+  let orphanMatch = null
+
+  if (orphanCandidates.length === 1) {
+    const orphan = orphanCandidates[0]
+
+    try {
+      const result = await matchSrsRuleSetWithLocalBinary(
+        orphan.name,
+        normalizeRuleProviderUrl(orphan.source_url),
+        target,
+      )
+      orphanMatch = { ...result, orphanName: orphan.name }
+    } catch (error) {
+      orphanMatch = { hit: false, error: getErrorMessage(error), orphanName: orphan.name }
+    }
+  }
+
+  return { map, orphanMatch }
 }
 
-const evaluateRoutePenetrationRules = (lookup, controllerRules, srsMatchMap = new Map()) => {
+const evaluateRoutePenetrationRules = (
+  lookup,
+  controllerRules,
+  srsMatchMap = new Map(),
+  orphanMatch = null,
+) => {
   let matchError = ''
 
   // RuleSet 条件的三态求值;无法确认时写入 matchError 并立即中断整个求值
@@ -5035,7 +5237,24 @@ const evaluateRoutePenetrationRules = (lookup, controllerRules, srsMatchMap = ne
     const cachedProvider = name ? getCachedRuleProviderByNameStatement.get(name) : null
 
     if (!cachedProvider) {
-      matchError = `rule provider cache not found: ${name}`
+      // 缓存缺失时:先试推导 URL 的二进制匹配;推导失败(如改名后文件名猜不中)
+      // 再退到唯一的孤儿规则集(旧 tag 名下的同内容文件)
+      const derivedResult = srsMatchMap.get(name)
+
+      if (derivedResult && !derivedResult.error) {
+        return derivedResult.hit
+      }
+
+      if (orphanMatch) {
+        if (orphanMatch.error) {
+          matchError = orphanMatch.error
+          return null
+        }
+
+        return orphanMatch.hit
+      }
+
+      matchError = derivedResult?.error || `rule provider cache not found: ${name}`
       return null
     }
 
@@ -5221,13 +5440,26 @@ const findLocalSingBoxBinary = () => {
     '/etc/momo/bin/sing-box',
   ].filter(Boolean)
 
-  return candidates.find((candidate) => {
+  const found = candidates.find((candidate) => {
     try {
       return fs.existsSync(candidate) && fs.statSync(candidate).isFile()
     } catch {
       return false
     }
   })
+
+  if (found) {
+    return found
+  }
+
+  // 兜底:从 PATH 里找(sing-box 装在非标准位置但已在 PATH 中时)
+  try {
+    const which = execFileSync('which', ['sing-box'], { encoding: 'utf8', timeout: 3000 }).trim()
+
+    return which || null
+  } catch {
+    return null
+  }
 }
 
 const srsCacheDir = path.join(dataDir, 'rule-srs')
@@ -5288,9 +5520,12 @@ const matchSrsRuleSetWithLocalBinary = async (providerName, url, target) => {
     stderr = error?.stderr || ''
   }
 
-  // "match rules." 可能出现在 stdout 或 stderr(不同版本行为不一致)
-  if (/^match rules\./m.test(`${stdout}${stderr}`)) {
-    return { hit: true }
+  // "match rules." 可能出现在 stdout 或 stderr(不同版本行为不一致),后面跟命中条目序号
+  const matchOutput = `${stdout}${stderr}`
+  const matchLine = matchOutput.match(/^match rules\.\[(\d+)\]/m)
+
+  if (matchLine) {
+    return { hit: true, line: Number.parseInt(matchLine[1], 10) + 1 }
   }
 
   if (code !== 0 && !stdout && !stderr) {
@@ -5340,40 +5575,68 @@ const findLocalSingBoxProxyInbound = () => {
 }
 
 // 优先经本机 sing-box 代理端口发起(结果才反映内核真实路由);无本地入站则服务端直连发出。
-const fireRoutePenetrationRequest = (lookup, target) => {
+// 返回 Promise<{ status, ms, location, error }> 供"真实路由"块展示请求耗时与 HTTP 状态。
+const fireRoutePenetrationRequest = async (lookup, target) => {
   const inbound = findLocalSingBoxProxyInbound()
   const bracketedTarget = lookup.type === 'ip' && lookup.parsedIp.version === 6 ? `[${target}]` : target
+  const requestUrl = `http://${bracketedTarget}/`
+  const startedAt = Date.now()
 
   if (inbound) {
-    const request = http.request(
-      {
-        host: inbound.host,
-        port: inbound.port,
-        method: 'GET',
-        path: `http://${bracketedTarget}/`,
-        headers: { Host: bracketedTarget },
-        timeout: 8000,
-      },
-      () => {
-        // 不消费响应体,保持连接打开直到 /connections 捕获后由 DELETE 清理
-      },
-    )
-    request.on('error', () => {})
-    request.on('timeout', () => request.destroy())
-    request.end()
-    return
+    return await new Promise((resolve) => {
+      const request = http.request(
+        {
+          host: inbound.host,
+          port: inbound.port,
+          method: 'GET',
+          path: requestUrl,
+          headers: { Host: bracketedTarget },
+          timeout: 8000,
+        },
+        (response) => {
+          const result = {
+            status: response.statusCode || 0,
+            ms: Date.now() - startedAt,
+            location: String(response.headers?.location || ''),
+            error: '',
+          }
+          // 不消费响应体,保持连接打开直到 /connections 捕获后由 DELETE 清理
+          resolve(result)
+        },
+      )
+
+      request.on('error', (error) => {
+        resolve({ status: 0, ms: Date.now() - startedAt, location: '', error: getErrorMessage(error) })
+      })
+      request.on('timeout', () => {
+        request.destroy()
+        resolve({ status: 0, ms: Date.now() - startedAt, location: '', error: 'request timeout' })
+      })
+      request.end()
+    })
   }
 
-  void fetch(`http://${bracketedTarget}/`, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(8000),
-  }).catch(() => {})
+  try {
+    const response = await fetch(requestUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(8000),
+    })
+
+    return {
+      status: response.status,
+      ms: Date.now() - startedAt,
+      location: response.headers.get('location') || '',
+      error: '',
+    }
+  } catch (error) {
+    return { status: 0, ms: Date.now() - startedAt, location: '', error: getErrorMessage(error) }
+  }
 }
 
 // 由服务端实际发起一次请求(结果可失败,只为触发核心建立连接),
 // 随后轮询 /connections 捕获该目标的真实连接:命中规则、链路、DNS 解析结果。
 const runRoutePenetrationLiveTest = async (backend, lookup, target) => {
-  fireRoutePenetrationRequest(lookup, target)
+  let requestPromise = fireRoutePenetrationRequest(lookup, target)
 
   const normalizedTarget = String(target || '').trim().toLowerCase()
   const MAX_POLLS = 36
@@ -5384,7 +5647,7 @@ const runRoutePenetrationLiveTest = async (backend, lookup, target) => {
     if (i > 0) await sleepForMs(i <= 16 ? 30 : 200)
 
     if (i === 3 || i === 9 || i === 21) {
-      fireRoutePenetrationRequest(lookup, target)
+      requestPromise = fireRoutePenetrationRequest(lookup, target)
     }
 
     let connections = []
@@ -5424,6 +5687,12 @@ const runRoutePenetrationLiveTest = async (backend, lookup, target) => {
         // 清理失败不影响结果
       }
 
+      // 找到连接后,等最新的真实请求结果(最多 1.5 秒)以拿到 HTTP 状态与耗时
+      const requestResult = await Promise.race([
+        requestPromise,
+        sleepForMs(1500).then(() => null),
+      ])
+
       return {
         found: true,
         id: connection.id,
@@ -5435,6 +5704,10 @@ const runRoutePenetrationLiveTest = async (backend, lookup, target) => {
         destinationPort: String(metadata.destinationPort || ''),
         dnsMode: String(metadata.dnsMode || ''),
         sniffHost: String(metadata.sniffHost || ''),
+        requestMs: requestResult?.ms || 0,
+        httpStatus: requestResult?.status || 0,
+        httpLocation: requestResult?.location || '',
+        requestError: requestResult?.error || '',
       }
     }
   }
@@ -5447,6 +5720,8 @@ const runRoutePenetrationLiveTest = async (backend, lookup, target) => {
 }
 
 const queryRoutePenetrationDns = async (backend, target) => {
+  const startedAt = Date.now()
+
   try {
     const response = await controllerFetch(
       backend,
@@ -5457,9 +5732,9 @@ const queryRoutePenetrationDns = async (backend, target) => {
       },
     )
 
-    return await response.json()
+    return { answer: await response.json(), ms: Date.now() - startedAt }
   } catch {
-    return null
+    return { answer: null, ms: Date.now() - startedAt }
   }
 }
 
@@ -5898,11 +6173,12 @@ app.post('/api/route-penetration', async (req, res) => {
     }
 
     const controllerRules = await fetchControllerRules(backend)
-    const srsMatchMap = await buildSrsMatchMap(controllerRules, target)
+    const { map: srsMatchMap, orphanMatch } = await buildSrsMatchMap(controllerRules, target)
     const { matched, matchError, finalOutbound, skippedTypes } = evaluateRoutePenetrationRules(
       lookup,
       controllerRules,
       srsMatchMap,
+      orphanMatch,
     )
 
     // matchError 已设置时,finalOutbound/链路结论不再可信,不自信地报告
@@ -5919,6 +6195,35 @@ app.post('/api/route-penetration', async (req, res) => {
       const chainResult = await resolveRoutePenetrationChain(backend, resolvedOutbound)
       chain = chainResult.chain
       chainError = chainResult.chainError || ''
+    }
+
+    // 域名会由哪个 DNS 服务器解析(读本机 sing-box 配置推断);IP 输入不涉及
+    const dnsInfo =
+      lookup.type === 'domain'
+        ? resolveDnsRouteInfo(lookup, findLocalSingBoxConfig(), srsMatchMap, orphanMatch)
+        : null
+
+    // 命中的规则若是规则集,附带集内命中的条目(文本缓存给行号+值,.srs 只能给行号)
+    let matchedEntry = null
+
+    if (matched) {
+      const conditionMatch = matched.payload.match(/^rule_set=([A-Za-z0-9._!-]+)$/)
+      const ruleSetName = conditionMatch?.[1] || (matched.type === 'RuleSet' ? matched.payload : '')
+
+      if (ruleSetName) {
+        const cachedProvider = getCachedRuleProviderByNameStatement.get(ruleSetName)
+        const srsResult = srsMatchMap.get(ruleSetName)
+
+        if (cachedProvider && String(cachedProvider.behavior || '').toLowerCase() !== 'srs') {
+          const textMatch = findStrictRuleSetMatches(lookup, cachedProvider.body)[0]
+
+          if (textMatch) {
+            matchedEntry = { ruleset: ruleSetName, ...textMatch }
+          }
+        } else if (srsResult?.hit && Number.isInteger(srsResult.line)) {
+          matchedEntry = { ruleset: ruleSetName, line: srsResult.line, value: '', mode: '' }
+        }
+      }
     }
 
     let live = null
@@ -5947,6 +6252,8 @@ app.post('/api/route-penetration', async (req, res) => {
         resolvedOutbound,
         chain,
         chainError,
+        dns: dnsInfo,
+        matchedEntry,
       },
       live,
       liveError,

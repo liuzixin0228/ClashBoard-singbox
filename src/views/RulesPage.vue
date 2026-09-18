@@ -7,9 +7,21 @@
         :style="padding"
       >
         <div class="app-page-gap app-page-padding flex flex-col">
+          <RoutePreviewCard
+            v-if="routePreviewResult"
+            :result="routePreviewResult"
+          />
+          <div
+            v-else-if="routePreviewLoading"
+            class="card app-card-padding text-sm"
+          >
+            <span class="loading loading-spinner loading-xs mr-2 align-middle" />
+            {{ t('routePreviewLoading') }}
+          </div>
           <RoutePenetrationCard
             v-if="routePenetrationResult"
             :result="routePenetrationResult"
+            @retest="retestRoutePenetration"
           />
           <RuleCard
             v-for="rule in renderRules"
@@ -21,11 +33,16 @@
       </div>
     </template>
     <template v-else>
-      <div
-        v-if="routePenetrationResult"
-        class="app-page-margin shrink-0"
-      >
-        <RoutePenetrationCard :result="routePenetrationResult" />
+      <div class="app-page-margin shrink-0">
+        <RoutePreviewCard
+          v-if="routePreviewResult"
+          :result="routePreviewResult"
+        />
+        <RoutePenetrationCard
+          v-if="routePenetrationResult"
+          :result="routePenetrationResult"
+          @retest="retestRoutePenetration"
+        />
       </div>
       <VirtualScroller
         class="min-h-0 flex-1"
@@ -47,18 +64,13 @@
 </template>
 
 <script setup lang="ts">
-import VirtualScroller from '@/components/common/VirtualScroller.vue'
 import ProxyGroupRulePenetrationDialog from '@/components/proxies/ProxyGroupRulePenetrationDialog.vue'
-import RoutePenetrationCard from '@/components/rules/RoutePenetrationCard.vue'
 import RuleCard from '@/components/rules/RuleCard.vue'
+import RoutePenetrationCard from '@/components/rules/RoutePenetrationCard.vue'
+import RoutePreviewCard from '@/components/rules/RoutePreviewCard.vue'
 import RulesCtrl from '@/components/sidebar/RulesCtrl.tsx'
+import VirtualScroller from '@/components/common/VirtualScroller.vue'
 import { usePaddingForViews } from '@/composables/paddingViews'
-import { fetchProxies } from '@/store/proxies'
-import {
-  resetRoutePenetration,
-  routePenetrationQueriedTarget,
-  routePenetrationResult,
-} from '@/store/routePenetration'
 import {
   applyRuleProviderCacheStats,
   fetchRuleProviderCacheStats,
@@ -69,11 +81,32 @@ import {
   ruleCacheTotalRules,
   ruleProviderList,
   rules,
-  rulesFilter,
   updateRuleProviderCache,
 } from '@/store/rules'
+import { fetchProxies } from '@/store/proxies'
+import {
+  resetRoutePenetration,
+  routePenetrationQueriedTarget,
+  routePenetrationResult,
+  routePreviewLoading,
+  routePreviewResult,
+  runRoutePenetration,
+  runRoutePenetrationPreview,
+} from '@/store/routePenetration'
+import { rulesFilter } from '@/store/rules'
 import type { Rule } from '@/types'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
+
+const retestRoutePenetration = () => {
+  const target = routePenetrationQueriedTarget.value || rulesFilter.value.trim()
+
+  if (target) {
+    void runRoutePenetration(target)
+  }
+}
 
 const autoRuleCacheBootstrapAttempted = ref(false)
 
@@ -100,14 +133,26 @@ void Promise.allSettled([fetchRules(), fetchProxies()]).then(async () => {
   }
 })
 
-watch(rulesFilter, () => {
-  // 搜索内容变化后,上一轮真实路由检测结果即过期,清掉避免张冠李戴
-  if (
-    routePenetrationResult.value &&
-    rulesFilter.value.trim() !== routePenetrationQueriedTarget.value
-  ) {
-    resetRoutePenetration()
-  }
+let previewTimer: ReturnType<typeof setTimeout> | undefined
+
+watch(rulesFilter, (value) => {
+  // 搜索只负责过滤列表;检测类结果一律清除,规则路由预览 800ms 防抖后自动查询
+  if (previewTimer) clearTimeout(previewTimer)
+  resetRoutePenetration()
+
+  const trimmed = value.trim()
+
+  if (!trimmed) return
+
+  previewTimer = setTimeout(() => {
+    void runRoutePenetrationPreview(trimmed)
+  }, 800)
+})
+
+onBeforeUnmount(() => {
+  if (previewTimer) clearTimeout(previewTimer)
+  // 离开规则页即清掉检测结果,避免下次进入时残留
+  resetRoutePenetration()
 })
 
 const { padding, paddingTop } = usePaddingForViews({

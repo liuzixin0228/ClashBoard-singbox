@@ -1,6 +1,5 @@
 import { useCtrlsBar } from '@/composables/useCtrlsBar'
 import { showNotification } from '@/helper/notification'
-import { routePenetrationLoading, runRoutePenetration } from '@/store/routePenetration'
 import {
   applyRuleProviderCacheStats,
   cancelBackgroundRuleRefresh,
@@ -18,6 +17,10 @@ import {
   displayLatencyInRule,
   displayNowNodeInRule,
 } from '@/store/settings'
+import {
+  routePenetrationLoading,
+  runRoutePenetration,
+} from '@/store/routePenetration'
 import { ArrowPathIcon, BoltIcon, WrenchScrewdriverIcon } from '@heroicons/vue/24/outline'
 import { computed, defineComponent, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
