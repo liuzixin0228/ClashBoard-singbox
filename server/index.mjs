@@ -1648,6 +1648,19 @@ const getRuleProviderKind = (url, format, behavior) => {
     return 'mrs-domain'
   }
 
+  // sing-box .srs 二进制规则集:预览匹配需要反编译成源码 JSON 才能文本求值
+  if (
+    normalizedUrl.endsWith('.srs') ||
+    normalizedFormat === 'binary' ||
+    normalizedBehavior === 'srs'
+  ) {
+    if (normalizedBehavior === 'ipcidr' || normalizedUrl.includes('/geoip/')) {
+      return 'srs-ip'
+    }
+
+    return 'srs-domain'
+  }
+
   return 'text'
 }
 
@@ -3180,11 +3193,24 @@ const findMatchesInTextRulesByLookups = async (lookups, body) => {
   return mergeLookupMatches(lookups.map((lookup) => findMatchesInTextRules(lookup, body)))
 }
 const countRulesInBody = (body) => {
-  if (!body || !body.trim()) {
+  const trimmed = typeof body === 'string' ? body.trim() : ''
+
+  if (!trimmed) {
     return 0
   }
 
-  return body
+  // 源码 JSON(rule-set decompile 产物)按 rules 条目计数
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+
+      return Array.isArray(parsed?.rules) ? parsed.rules.length : 0
+    } catch {
+      return 0
+    }
+  }
+
+  return trimmed
     .split(/\r?\n/)
     .filter((line) => {
       const trimmedLine = line.trim()
@@ -3945,7 +3971,135 @@ const convertMrsToText = async (provider, buffer) => {
   }
 }
 
+// 从 ps 输出里找远端 sing-box 二进制路径(参数里的 argv[0] 即可执行文件)
+const findRemoteSingBoxBinary = async (client) => {
+  const result = await sshExec(client, 'ps ww 2>/dev/null || ps w', { maxBuffer: 256 * 1024 }).catch(
+    () => null,
+  )
+
+  for (const line of (result?.stdout || '').split(/\r?\n/)) {
+    const match = line.match(/(\/[^\s]*sing-box(?:\.exe)?)[\s]/)
+
+    if (match?.[1]) {
+      return match[1]
+    }
+  }
+
+  return ''
+}
+
+// .srs 反编译成源码 JSON:
+// 1) 本机有 sing-box 二进制 → 下载后本地反编译(Mac/本机内核场景);
+// 2) 规则源走远端 SSH → 借远端(OpenWrt)上的 sing-box 完成 下载+反编译,拿回 JSON 文本。
+// 反编译产物是普通文本,入库后预览匹配不再需要任何二进制。
+const decompileSrsWithBinary = async (singboxBin, url) => {
+  const response = await fetch(url)
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer())
+  const base = path.join(
+    ruleSearchTempDir,
+    `decompile-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  )
+  fs.mkdirSync(ruleSearchTempDir, { recursive: true })
+  await fs.promises.writeFile(`${base}.srs`, buffer)
+
+  try {
+    await execFileAsync(singboxBin, ['rule-set', 'decompile', `${base}.srs`, '-o', `${base}.json`])
+    return await fs.promises.readFile(`${base}.json`, 'utf8')
+  } finally {
+    fs.rmSync(`${base}.srs`, { force: true })
+    fs.rmSync(`${base}.json`, { force: true })
+  }
+}
+
+const decompileSrsViaSsh = async (config, provider) => {
+  return await withOpenWrtSshClient(config, async (client) => {
+    const remoteBin = await findRemoteSingBoxBinary(client)
+
+    if (!remoteBin) {
+      throw new Error('sing-box binary not found on the remote host')
+    }
+
+    const base = `/tmp/clashboard-decompile-${Date.now()}`
+    const decompileCommand = `${shellQuote(remoteBin)} rule-set decompile ${base}.srs -o ${base}.json && cat ${base}.json`
+
+    // 1) 让路由器自己下载(有 curl/wget + TLS 时最省流量)
+    let result = await sshExec(
+      client,
+      `(curl -sL ${shellQuote(provider.url)} -o ${base}.srs 2>/dev/null || ` +
+        `wget -q ${shellQuote(provider.url)} -O ${base}.srs) && ` +
+        `${decompileCommand}; rm -f ${base}.srs ${base}.json`,
+      { maxBuffer: 16 * 1024 * 1024 },
+    ).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+
+    // 2) 路由器下载失败(常见于 busybox wget 无 TLS):服务端下载后 base64 推过去
+    if (result.code !== 0 && !result.stdout.trim()) {
+      const response = await fetch(provider.url)
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer())
+
+      if (buffer.length > 512 * 1024) {
+        throw new Error('srs file too large for ssh transfer')
+      }
+
+      result = await sshExec(
+        client,
+        `echo ${shellQuote(buffer.toString('base64'))} | base64 -d > ${base}.srs && ` +
+          `${decompileCommand}; rm -f ${base}.srs ${base}.json`,
+        { maxBuffer: 16 * 1024 * 1024 },
+      ).catch(() => ({ code: 1, stdout: '', stderr: '' }))
+    }
+
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim() || 'remote decompile failed')
+    }
+
+    return result.stdout
+  })
+}
+
+const decompileSrsProviderBody = async (provider) => {
+  const singboxBin = findLocalSingBoxBinary()
+
+  if (singboxBin) {
+    try {
+      return await decompileSrsWithBinary(singboxBin, provider.url)
+    } catch {
+      // 本机反编译失败,继续尝试远端
+    }
+  }
+
+  const sshConfig = readOpenWrtRuleSourceSshConfig()
+
+  if (sshConfig.configured && !sshConfig.isLocal) {
+    try {
+      return await decompileSrsViaSsh(sshConfig, provider)
+    } catch {
+      // 远端也不可用,退回原始下载
+    }
+  }
+
+  return null
+}
+
 const fetchProviderBody = async (provider) => {
+  // .srs 二进制:先反编译成源码 JSON 文本入库,预览匹配才能文本求值
+  if (provider.kind === 'srs-domain' || provider.kind === 'srs-ip') {
+    const decompiled = await decompileSrsProviderBody(provider)
+
+    if (decompiled) {
+      return decompiled
+    }
+  }
+
   const response = await fetch(provider.url, {
     signal: activeRuleProviderUpdateController?.signal,
   })
@@ -4932,6 +5086,70 @@ const splitTopLevelOr = (payload) => {
 }
 
 // mihomo/clash 传统规则(type 即条件类型,payload 是裸值)的兼容求值
+// sing-box 源码 JSON(rule-set decompile 产物)的严格匹配。
+// 返回 { matches, uncertain }:uncertain 表示规则集里有本匹配器不支持的
+// 逻辑/条件结构,结果只能"无法确认",绝不能当成"未命中"。
+const findStrictRuleSetMatchesFromSourceJson = (lookup, body) => {
+  let parsed
+
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return { matches: [], uncertain: true }
+  }
+
+  const rules = Array.isArray(parsed?.rules) ? parsed.rules : []
+  const matches = []
+  let uncertain = false
+
+  // 反编译产物里单值字段是字符串、多值是数组,统一按数组处理
+  const asArray = (value) => (Array.isArray(value) ? value : typeof value === 'string' ? [value] : [])
+
+  rules.forEach((rule, ruleIndex) => {
+    if (!rule || typeof rule !== 'object') {
+      return
+    }
+
+    if (rule.type === 'logical' || Array.isArray(rule.conditions)) {
+      uncertain = true
+      return
+    }
+
+    let hit = ''
+
+    if (lookup.type === 'domain') {
+      hit = asArray(rule.domain).find((value) => isDomainMatch(lookup.value, value, 'domain')) || ''
+
+      if (!hit) {
+        hit = asArray(rule.domain_suffix).find((value) => isDomainMatch(lookup.value, value, 'suffix')) || ''
+      }
+
+      if (!hit) {
+        hit = asArray(rule.domain_keyword).find((value) => isDomainMatch(lookup.value, value, 'keyword')) || ''
+      }
+
+      if (!hit) {
+        hit =
+          asArray(rule.domain_regex).find((value) => {
+            try {
+              return new RegExp(value, 'i').test(lookup.value)
+            } catch {
+              return false
+            }
+          }) || ''
+      }
+    } else if (lookup.type === 'ip') {
+      hit = asArray(rule.ip_cidr).find((value) => isIpInCidr(lookup.parsedIp, value)) || ''
+    }
+
+    if (hit) {
+      matches.push({ line: ruleIndex + 1, value: hit, mode: 'domain', raw: '' })
+    }
+  })
+
+  return { matches, uncertain }
+}
+
 const evaluateLegacyDirectType = (lookup, normalizedType, payload) => {
   if (!payload) return null
   switch (normalizedType) {
@@ -5178,6 +5396,9 @@ const buildSrsMatchMap = async (controllerRules, target) => {
 
       if (String(cachedProvider.behavior || '').toLowerCase() !== 'srs') return
 
+      // 同步入库的已是反编译源码 JSON:文本求值即可,无需本机/远端二进制
+      if (String(cachedProvider.body || '').trim().startsWith('{')) return
+
       const url = normalizeRuleProviderUrl(cachedProvider.source_url)
 
       if (!url) {
@@ -5259,7 +5480,21 @@ const evaluateRoutePenetrationRules = (
     }
 
     if (String(cachedProvider.behavior || '').toLowerCase() === 'srs') {
-      // .srs 二进制规则集:用进入求值前算好的本机 sing-box 匹配结果
+      // 同步时已把 .srs 反编译成源码 JSON 文本:直接文本求值,无需二进制
+      const body = String(cachedProvider.body || '').trim()
+
+      if (body.startsWith('{')) {
+        const jsonResult = findStrictRuleSetMatchesFromSourceJson(lookup, body)
+
+        if (jsonResult.uncertain) {
+          matchError = `ruleset contains unsupported (logical) rules: ${name}`
+          return null
+        }
+
+        return jsonResult.matches.length > 0
+      }
+
+      // 缓存还是原始二进制(反编译不可用):用进入求值前算好的本机 sing-box 匹配结果
       const srsResult = srsMatchMap.get(name)
 
       if (!srsResult) {
@@ -6220,6 +6455,16 @@ app.post('/api/route-penetration', async (req, res) => {
           if (textMatch) {
             matchedEntry = { ruleset: ruleSetName, ...textMatch }
           }
+        } else if (
+          cachedProvider &&
+          String(cachedProvider.body || '').trim().startsWith('{')
+        ) {
+          const jsonMatch = findStrictRuleSetMatchesFromSourceJson(lookup, cachedProvider.body)
+            .matches[0]
+
+          if (jsonMatch) {
+            matchedEntry = { ruleset: ruleSetName, ...jsonMatch }
+          }
         } else if (srsResult?.hit && Number.isInteger(srsResult.line)) {
           matchedEntry = { ruleset: ruleSetName, line: srsResult.line, value: '', mode: '' }
         }
@@ -6584,6 +6829,7 @@ export {
   seedRuleProviderCacheForTesting,
   evaluateRoutePenetrationRules as evaluateRoutePenetrationRulesForTesting,
   findStrictRuleSetMatches as findStrictRuleSetMatchesForTesting,
+  findStrictRuleSetMatchesFromSourceJson,
   normalizeLookupInput as normalizeLookupInputForTesting,
   server,
   shutdownServer,

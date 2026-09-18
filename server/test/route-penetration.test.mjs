@@ -13,6 +13,7 @@ const serverModuleUrl = new URL(`./../index.mjs?test=${Date.now()}`, import.meta
 const {
   evaluateRoutePenetrationRulesForTesting,
   findStrictRuleSetMatchesForTesting,
+  findStrictRuleSetMatchesFromSourceJson: findStrictRuleSetMatchesFromSourceJsonForTesting,
   normalizeLookupInputForTesting,
   seedRuleProviderCacheForTesting,
   shutdownServer,
@@ -330,4 +331,85 @@ test('strict rule set match: ip lines never match domain lookups', () => {
     ).length,
     1,
   )
+})
+
+test('source json ruleset: decompiled body matches via json matcher', () => {
+  const body = JSON.stringify({
+    version: 2,
+    rules: [
+      { domain_suffix: ['ads.youtube.com', 'ggpht.com'] },
+      { domain: 'www.youtube.com' },
+      { ip_cidr: ['8.8.8.0/24'] },
+    ],
+  })
+
+  const result = findStrictRuleSetMatchesFromSourceJsonForTesting(
+    normalizeLookupInputForTesting('www.youtube.com'),
+    body,
+  )
+
+  assert.equal(result.uncertain, false)
+  assert.equal(result.matches.length, 1)
+  assert.equal(result.matches[0].value, 'www.youtube.com')
+
+  const suffixResult = findStrictRuleSetMatchesFromSourceJsonForTesting(
+    normalizeLookupInputForTesting('www.ggpht.com'),
+    body,
+  )
+  assert.equal(suffixResult.matches.length, 1)
+  assert.equal(suffixResult.matches[0].value, 'ggpht.com')
+
+  const ipResult = findStrictRuleSetMatchesFromSourceJsonForTesting(
+    normalizeLookupInputForTesting('8.8.8.8'),
+    body,
+  )
+  assert.equal(ipResult.matches.length, 1)
+
+  const missResult = findStrictRuleSetMatchesFromSourceJsonForTesting(
+    normalizeLookupInputForTesting('example.org'),
+    body,
+  )
+  assert.equal(missResult.matches.length, 0)
+  assert.equal(missResult.uncertain, false)
+})
+
+test('source json ruleset: logical rules keep result uncertain', () => {
+  const body = JSON.stringify({
+    version: 2,
+    rules: [{ type: 'logical', conditions: [{ domain_suffix: ['youtube.com'] }], invert: false }],
+  })
+
+  const result = findStrictRuleSetMatchesFromSourceJsonForTesting(
+    normalizeLookupInputForTesting('www.youtube.com'),
+    body,
+  )
+
+  assert.equal(result.uncertain, true)
+  assert.equal(result.matches.length, 0)
+})
+
+test('evaluate: srs provider with decompiled json body matches without binary map', () => {
+  seedRuleProviderCacheForTesting([
+    {
+      name: 'geosite-youtube',
+      behavior: 'srs',
+      format: 'binary',
+      url: 'https://example.test/youtube.srs',
+      body: JSON.stringify({
+        version: 2,
+        rules: [{ domain_suffix: ['youtube.com'] }, { domain: 'youtu.be' }],
+      }),
+    },
+  ])
+
+  const rules = [CONTROLLER_RULE('default', 'rule_set=geosite-youtube', 'route(YouTube)'), CONTROLLER_RULE('Match', '', 'DIRECT')]
+
+  const result = evaluateRoutePenetrationRulesForTesting(
+    normalizeLookupInputForTesting('www.youtube.com'),
+    rules,
+  )
+
+  assert.ok(result.matched)
+  assert.equal(result.matched.outbound, 'YouTube')
+  assert.equal(result.matchError, '')
 })
