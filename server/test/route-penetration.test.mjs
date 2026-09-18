@@ -96,7 +96,10 @@ test('route penetration: binary .srs cache yields matchError', () => {
     },
   ])
 
-  const rules = [CONTROLLER_RULE('RuleSet', 'geosite', 'PROXY'), CONTROLLER_RULE('Match', '', 'DIRECT')]
+  const rules = [
+    CONTROLLER_RULE('RuleSet', 'geosite', 'PROXY'),
+    CONTROLLER_RULE('Match', '', 'DIRECT'),
+  ]
 
   const result = evaluateRoutePenetrationRulesForTesting(DOMAIN_LOOKUP, rules)
 
@@ -142,7 +145,10 @@ test('route penetration: sing-box route(...) outbound is unwrapped', () => {
 })
 
 test('route penetration: ip_is_private matches private ip lookups only', () => {
-  const rules = [CONTROLLER_RULE('IpIsPrivate', true, 'DIRECT'), CONTROLLER_RULE('Match', '', 'PROXY')]
+  const rules = [
+    CONTROLLER_RULE('IpIsPrivate', true, 'DIRECT'),
+    CONTROLLER_RULE('Match', '', 'PROXY'),
+  ]
 
   const privateResult = evaluateRoutePenetrationRulesForTesting(IP_LOOKUP, rules)
   assert.ok(privateResult.matched)
@@ -262,7 +268,10 @@ test('route penetration: sing-box default rule_set payload resolves cached provi
     },
   ])
 
-  const rules = [CONTROLLER_RULE('default', 'rule_set=streaming', 'route(PROXY)'), CONTROLLER_RULE('Match', '', 'DIRECT')]
+  const rules = [
+    CONTROLLER_RULE('default', 'rule_set=streaming', 'route(PROXY)'),
+    CONTROLLER_RULE('Match', '', 'DIRECT'),
+  ]
 
   const result = evaluateRoutePenetrationRulesForTesting(DOMAIN_LOOKUP, rules)
 
@@ -298,24 +307,16 @@ test('strict rule set match: suffix matches subdomain and apex but not unrelated
   const lookup = DOMAIN_LOOKUP
 
   assert.equal(findStrictRuleSetMatchesForTesting(lookup, body).length, 1)
-  assert.equal(
-    findStrictRuleSetMatchesForTesting({ ...lookup, value: 'flix.com' }, body).length,
-    0,
-  )
+  assert.equal(findStrictRuleSetMatchesForTesting({ ...lookup, value: 'flix.com' }, body).length, 0)
 })
 
 test('strict rule set match: bare domain lines and +. wildcard lines match', () => {
   const body = 'www.netflix.com\n+.openai.com\n'
 
+  assert.equal(findStrictRuleSetMatchesForTesting(DOMAIN_LOOKUP, body).length, 1)
   assert.equal(
-    findStrictRuleSetMatchesForTesting(DOMAIN_LOOKUP, body).length,
-    1,
-  )
-  assert.equal(
-    findStrictRuleSetMatchesForTesting(
-      normalizeLookupInputForTesting('api.openai.com'),
-      body,
-    ).length,
+    findStrictRuleSetMatchesForTesting(normalizeLookupInputForTesting('api.openai.com'), body)
+      .length,
     1,
   )
 })
@@ -325,10 +326,7 @@ test('strict rule set match: ip lines never match domain lookups', () => {
 
   assert.equal(findStrictRuleSetMatchesForTesting(DOMAIN_LOOKUP, body).length, 0)
   assert.equal(
-    findStrictRuleSetMatchesForTesting(
-      normalizeLookupInputForTesting('8.8.8.8'),
-      body,
-    ).length,
+    findStrictRuleSetMatchesForTesting(normalizeLookupInputForTesting('8.8.8.8'), body).length,
     1,
   )
 })
@@ -402,7 +400,10 @@ test('evaluate: srs provider with decompiled json body matches without binary ma
     },
   ])
 
-  const rules = [CONTROLLER_RULE('default', 'rule_set=geosite-youtube', 'route(YouTube)'), CONTROLLER_RULE('Match', '', 'DIRECT')]
+  const rules = [
+    CONTROLLER_RULE('default', 'rule_set=geosite-youtube', 'route(YouTube)'),
+    CONTROLLER_RULE('Match', '', 'DIRECT'),
+  ]
 
   const result = evaluateRoutePenetrationRulesForTesting(
     normalizeLookupInputForTesting('www.youtube.com'),
@@ -412,4 +413,298 @@ test('evaluate: srs provider with decompiled json body matches without binary ma
   assert.ok(result.matched)
   assert.equal(result.matched.outbound, 'YouTube')
   assert.equal(result.matchError, '')
+})
+
+// ===== DNS 路由推断(parseSingBoxDnsInfoFromConfig / resolveDnsRouteInfo) =====
+
+const {
+  parseSingBoxDnsInfoFromConfigForTesting,
+  resolveDnsRouteInfoForTesting,
+  collectDnsRuleSetNamesForTesting,
+  buildDnsQueryPacketForTesting,
+  parseDnsResponsePacketForTesting,
+  isFakeIpValueForTesting,
+} = await import(serverModuleUrl.href)
+
+const USER_DNS_CONFIG = {
+  dns: {
+    servers: [
+      { tag: 'dns_dnsmasq', type: 'udp', server: '127.0.0.1', detour: '直连' },
+      { tag: 'local', type: 'local' },
+      { tag: 'ali', type: 'https', server: '223.5.5.5' },
+      { tag: 'google', type: 'https', server: '8.8.8.8', detour: '默认代理' },
+      {
+        tag: 'fakeip',
+        type: 'fakeip',
+        inet4_range: '198.19.0.0/16',
+        inet6_range: 'fc00::/18',
+      },
+    ],
+    rules: [
+      { query_type: ['HTTPS', 'SVCB'], action: 'reject' },
+      {
+        domain_suffix: ['lzxpm.top', 'lan', 'local', 'home.arpa', 'internal'],
+        server: 'dns_dnsmasq',
+      },
+      { clash_mode: 'Direct', server: 'ali' },
+      { clash_mode: 'Global', server: 'fakeip' },
+      { domain_suffix: ['m-team.cc'], server: 'ali' },
+      { rule_set: ['geosite-fakeipfilter-cn', 'geosite-cn'], server: 'ali' },
+      { query_type: ['A', 'AAAA'], server: 'fakeip', rewrite_ttl: 1 },
+    ],
+    final: 'google',
+    strategy: 'prefer_ipv4',
+  },
+  inbounds: [
+    { type: 'tun', tag: 'tun-in' },
+    { type: 'dns', tag: 'dns-in', listen: '0.0.0.0', listen_port: 1053 },
+  ],
+}
+
+test('dns config parse: extracts dns section and dns inbound port', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting(USER_DNS_CONFIG)
+
+  assert.ok(info)
+  assert.equal(info.dns.final, 'google')
+  assert.equal(info.dns.servers.length, 5)
+  assert.equal(info.dns.rules.length, 7)
+  assert.deepEqual(info.dnsInbound, { listen: '0.0.0.0', listen_port: 1053 })
+
+  assert.equal(parseSingBoxDnsInfoFromConfigForTesting({ dns: { servers: [] } }), null)
+  assert.equal(parseSingBoxDnsInfoFromConfigForTesting({}), null)
+})
+
+test('dns route: rule without explicit action defaults to route (domain_suffix)', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting(USER_DNS_CONFIG)
+  const lookup = normalizeLookupInputForTesting('www.lzxpm.top')
+
+  const result = resolveDnsRouteInfoForTesting(lookup, info, new Map())
+
+  assert.ok(result)
+  assert.equal(result.server, 'dns_dnsmasq')
+  assert.equal(result.protocol, 'udp')
+  assert.equal(result.address, '127.0.0.1')
+  assert.equal(result.detour, '直连')
+  assert.equal(result.matchedRule.index, 2)
+  assert.equal(result.matchedRule.summary, 'domain_suffix×5')
+})
+
+test('dns route: single-entry rule_set summary and AND-semantics rule_set match', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting(USER_DNS_CONFIG)
+  const lookup = normalizeLookupInputForTesting('www.m-team.cc')
+
+  const result = resolveDnsRouteInfoForTesting(lookup, info, new Map())
+
+  assert.equal(result.server, 'ali')
+  assert.equal(result.matchedRule.index, 5)
+  assert.equal(result.matchedRule.summary, 'domain_suffix: m-team.cc')
+
+  const cnLookup = normalizeLookupInputForTesting('www.baidu.com')
+  const srsMap = new Map([
+    ['geosite-fakeipfilter-cn', { hit: false }],
+    ['geosite-cn', { hit: true }],
+  ])
+
+  const cnResult = resolveDnsRouteInfoForTesting(cnLookup, info, srsMap)
+
+  // rule_set 条件是 AND 语义:只命中 geosite-cn 不够,还需 geosite-fakeipfilter-cn
+  assert.equal(cnResult.server, 'fakeip')
+  assert.equal(cnResult.fakeip, true)
+  assert.equal(cnResult.matchedRule.index, 7)
+})
+
+test('dns route: fakeip rule resolves real upstream by skipping fakeip servers', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting(USER_DNS_CONFIG)
+  const lookup = normalizeLookupInputForTesting('www.example.org')
+
+  const result = resolveDnsRouteInfoForTesting(lookup, info, new Map())
+
+  assert.equal(result.protocol, 'fakeip')
+  assert.equal(result.fakeip, true)
+  assert.equal(result.matchedRule.index, 7)
+  assert.ok(result.realServer)
+  assert.equal(result.realServer.server, 'google')
+  assert.equal(result.realServer.protocol, 'https')
+  assert.equal(result.realServer.address, '8.8.8.8')
+  assert.equal(result.realServer.detour, '默认代理')
+  assert.equal(result.realServer.isFinal, true)
+  assert.equal(result.realServer.matchedRule, null)
+})
+
+test('dns route: query_type reject skipped for A preview; clash_mode collected as notes', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting(USER_DNS_CONFIG)
+  const lookup = normalizeLookupInputForTesting('www.tailscale.com')
+
+  const result = resolveDnsRouteInfoForTesting(lookup, info, new Map())
+
+  // query_type [HTTPS,SVCB] 的 reject 规则不应拦住 A 预览
+  assert.notEqual(result.rejected, true)
+  // clash_mode 规则不参与预判,但作为备注返回
+  assert.deepEqual(
+    result.clashModes.map((note) => note.mode + '->' + note.server),
+    ['Direct->ali', 'Global->fakeip'],
+  )
+})
+
+test('dns route: domain_regex condition and AND semantics', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting({
+    dns: {
+      servers: [
+        { tag: 'a', type: 'udp', server: '1.1.1.1' },
+        { tag: 'b', type: 'udp', server: '9.9.9.9' },
+      ],
+      rules: [
+        {
+          domain_regex: ['^foo-[a-z]+[.]example[.]com$'],
+          domain_suffix: ['example.com'],
+          server: 'b',
+        },
+      ],
+      final: 'a',
+    },
+  })
+
+  const hit = resolveDnsRouteInfoForTesting(
+    normalizeLookupInputForTesting('foo-bar.example.com'),
+    info,
+    new Map(),
+  )
+
+  assert.equal(hit.server, 'b')
+  assert.equal(
+    hit.matchedRule.summary,
+    'domain_suffix: example.com + domain_regex: ^foo-[a-z]+[.]example[.]com$',
+  )
+
+  const miss = resolveDnsRouteInfoForTesting(
+    normalizeLookupInputForTesting('other.example.com'),
+    info,
+    new Map(),
+  )
+
+  assert.equal(miss.server, 'a')
+  assert.equal(miss.isFinal, true)
+})
+
+test('dns route: reject action keeps matched rule info', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting({
+    dns: {
+      servers: [{ tag: 'a', type: 'udp', server: '1.1.1.1' }],
+      rules: [{ domain_suffix: ['blocked.com'], action: 'reject' }],
+      final: 'a',
+    },
+  })
+
+  const result = resolveDnsRouteInfoForTesting(
+    normalizeLookupInputForTesting('x.blocked.com'),
+    info,
+    new Map(),
+  )
+
+  assert.equal(result.rejected, true)
+  assert.equal(result.matchedRule.index, 1)
+})
+
+test('dns rule-set names are collected from cached dns config', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting(USER_DNS_CONFIG)
+
+  assert.deepEqual(collectDnsRuleSetNamesForTesting(info), [
+    'geosite-fakeipfilter-cn',
+    'geosite-cn',
+  ])
+  assert.deepEqual(collectDnsRuleSetNamesForTesting(null), [])
+})
+
+// ===== UDP DNS 报文构造与解析 =====
+
+const encodeNameForTest = (labels) => {
+  const chunks = []
+
+  for (const label of labels) {
+    chunks.push(Buffer.from([label.length]), Buffer.from(label, 'utf8'))
+  }
+
+  chunks.push(Buffer.from([0]))
+
+  return Buffer.concat(chunks)
+}
+
+test('dns packet: build query and parse response with compressed names', () => {
+  const query = buildDnsQueryPacketForTesting(0x1234, 'www.example.com', 1)
+
+  // header(12) + qname(16) + root(1) + qtype/qclass(4)
+  assert.equal(query.length, 12 + 16 + 1 + 4)
+  assert.equal(query.readUInt16BE(0), 0x1234)
+
+  // 构造带压缩指针的回答:answer.name 指向 question 里的 www(偏移 12)
+  const response = Buffer.concat([
+    (() => {
+      const header = Buffer.alloc(12)
+      header.writeUInt16BE(0x1234, 0)
+      header.writeUInt16BE(0x8180, 2) // QR=1 RD=1 RA=1
+      header.writeUInt16BE(1, 4) // qd
+      header.writeUInt16BE(3, 6) // an
+      return header
+    })(),
+    // question: www.example.com A IN
+    encodeNameForTest(['www', 'example', 'com']),
+    Buffer.from([0, 1, 0, 1]),
+    // answer 1: 名字指针 -> www,CNAME 到 alias(指针指向 question 的 example 标签,rdata 共 8 字节)
+    Buffer.from([0xc0, 0x0c]),
+    Buffer.from([0, 5, 0, 1]),
+    Buffer.from([0, 0, 0, 60]),
+    Buffer.from([0, 8]),
+    Buffer.from([5]),
+    Buffer.from('alias', 'utf8'),
+    Buffer.from([0xc0, 0x10]),
+    // answer 2: A 1.2.3.4(TTL 256)
+    Buffer.from([0xc0, 0x0c]),
+    Buffer.from([0, 1, 0, 1]),
+    Buffer.from([0, 0, 1, 0]),
+    Buffer.from([0, 4]),
+    Buffer.from([1, 2, 3, 4]),
+    // answer 3: AAAA fd00::34(TTL 30)
+    Buffer.from([0xc0, 0x0c]),
+    Buffer.from([0, 28, 0, 1]),
+    Buffer.from([0, 0, 0, 30]),
+    Buffer.from([0, 16]),
+    Buffer.concat([Buffer.from([0xfd, 0x00]), Buffer.alloc(13), Buffer.from([0x34])]),
+  ])
+
+  const parsed = parseDnsResponsePacketForTesting(response)
+
+  assert.equal(parsed.id, 0x1234)
+  assert.equal(parsed.rcode, 0)
+  assert.equal(parsed.answers.length, 3)
+  assert.equal(parsed.answers[0].type, 5)
+  assert.equal(parsed.answers[0].value, '')
+  assert.equal(parsed.answers[1].type, 1)
+  assert.equal(parsed.answers[1].value, '1.2.3.4')
+  assert.equal(parsed.answers[1].ttl, 256)
+  assert.equal(parsed.answers[2].type, 28)
+  assert.equal(parsed.answers[2].value, 'fd00::34')
+})
+
+test('dns packet: fakeip range detection', () => {
+  assert.equal(isFakeIpValueForTesting('198.19.0.1'), true)
+  assert.equal(isFakeIpValueForTesting('198.18.5.5'), true)
+  assert.equal(isFakeIpValueForTesting('198.20.0.1'), false)
+  assert.equal(isFakeIpValueForTesting('8.8.8.8'), false)
+  assert.equal(isFakeIpValueForTesting('fc00::1234'), true)
+  assert.equal(isFakeIpValueForTesting('fc3f::1'), true)
+  assert.equal(isFakeIpValueForTesting('fc40::1'), false)
+  assert.equal(isFakeIpValueForTesting('fe80::1'), false)
+})
+
+test('dns config parse: falls back to dns-tagged inbound without explicit dns type', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting({
+    dns: { servers: [{ tag: 'ali', type: 'https', server: '223.5.5.5' }] },
+    inbounds: [
+      { type: 'direct', tag: 'dns-in', listen: '::', listen_port: 1053 },
+      { type: 'http', tag: 'http-in', listen: '::', listen_port: 8080 },
+    ],
+  })
+
+  assert.ok(info)
+  assert.deepEqual(info.dnsInbound, { listen: '::', listen_port: 1053 })
 })

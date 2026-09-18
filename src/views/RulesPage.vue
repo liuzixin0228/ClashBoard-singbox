@@ -18,6 +18,13 @@
             <span class="loading loading-spinner loading-xs mr-2 align-middle" />
             {{ t('routePreviewLoading') }}
           </div>
+          <div
+            v-if="routePenetrationError"
+            class="alert alert-error app-card-padding text-sm"
+          >
+            <ExclamationTriangleIcon class="h-4 w-4 shrink-0" />
+            <span class="min-w-0 break-all">{{ routePenetrationError }}</span>
+          </div>
           <RoutePenetrationCard
             v-if="routePenetrationResult"
             :result="routePenetrationResult"
@@ -38,6 +45,13 @@
           v-if="routePreviewResult"
           :result="routePreviewResult"
         />
+        <div
+          v-if="routePenetrationError"
+          class="alert alert-error app-card-padding text-sm"
+        >
+          <ExclamationTriangleIcon class="h-4 w-4 shrink-0" />
+          <span class="min-w-0 break-all">{{ routePenetrationError }}</span>
+        </div>
         <RoutePenetrationCard
           v-if="routePenetrationResult"
           :result="routePenetrationResult"
@@ -64,13 +78,25 @@
 </template>
 
 <script setup lang="ts">
+import VirtualScroller from '@/components/common/VirtualScroller.vue'
 import ProxyGroupRulePenetrationDialog from '@/components/proxies/ProxyGroupRulePenetrationDialog.vue'
-import RuleCard from '@/components/rules/RuleCard.vue'
 import RoutePenetrationCard from '@/components/rules/RoutePenetrationCard.vue'
 import RoutePreviewCard from '@/components/rules/RoutePreviewCard.vue'
+import RuleCard from '@/components/rules/RuleCard.vue'
 import RulesCtrl from '@/components/sidebar/RulesCtrl.tsx'
-import VirtualScroller from '@/components/common/VirtualScroller.vue'
 import { usePaddingForViews } from '@/composables/paddingViews'
+import { fetchProxies } from '@/store/proxies'
+import {
+  bootstrapDnsConfig,
+  resetRoutePenetration,
+  routePenetrationError,
+  routePenetrationQueriedTarget,
+  routePenetrationResult,
+  routePreviewLoading,
+  routePreviewResult,
+  runRoutePenetration,
+  runRoutePenetrationPreview,
+} from '@/store/routePenetration'
 import {
   applyRuleProviderCacheStats,
   fetchRuleProviderCacheStats,
@@ -81,20 +107,11 @@ import {
   ruleCacheTotalRules,
   ruleProviderList,
   rules,
+  rulesFilter,
   updateRuleProviderCache,
 } from '@/store/rules'
-import { fetchProxies } from '@/store/proxies'
-import {
-  resetRoutePenetration,
-  routePenetrationQueriedTarget,
-  routePenetrationResult,
-  routePreviewLoading,
-  routePreviewResult,
-  runRoutePenetration,
-  runRoutePenetrationPreview,
-} from '@/store/routePenetration'
-import { rulesFilter } from '@/store/rules'
 import type { Rule } from '@/types'
+import { ExclamationTriangleIcon } from '@heroicons/vue/24/outline'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -131,6 +148,9 @@ void Promise.allSettled([fetchRules(), fetchProxies()]).then(async () => {
   } catch {
     isRuleCacheUpdating.value = false
   }
+
+  // DNS 预览依赖内核运行配置的 dns 段缓存,首次进入时自动读取(失败静默)
+  void bootstrapDnsConfig()
 })
 
 let previewTimer: ReturnType<typeof setTimeout> | undefined

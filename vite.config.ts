@@ -39,6 +39,9 @@ export default defineConfig({
       '/api': {
         target: `http://127.0.0.1:${resolvedDevProxyPort}`,
         changeOrigin: true,
+        // 流量/连接/日志/内存都走 /api/controller-ws 的 WebSocket 升级,
+        // 不开 ws 的话升级请求会被 dev server 吞掉,本地拿不到实时数据
+        ws: true,
       },
     },
   },
