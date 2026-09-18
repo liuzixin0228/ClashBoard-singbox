@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test, { after } from 'node:test'
 
-const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ange-clashboard-test-'))
+const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clashboard-singbox-test-'))
 const dbPath = path.join(tempDir, 'zashboard.sqlite')
 
 process.env.ZASHBOARD_DB_PATH = dbPath
@@ -61,7 +61,7 @@ test('service auth state is enforced from persisted settings', () => {
   assert.deepEqual(
     getRequestAccessAuthStatusForTesting({
       headers: {
-        cookie: `ange_clashboard_access_session=${createAccessSessionTokenForTesting('test-secret')}`,
+        cookie: `clashboard_singbox_access_session=${createAccessSessionTokenForTesting('test-secret')}`,
       },
     }),
     {
@@ -298,7 +298,10 @@ test('proxy domain rule supports IP CIDR rule values', () => {
   )
 
   assert.equal(result.changed, true)
-  assert.match(result.content, /rules:\n  - MATCH,DIRECT\n  - SRC-IP-CIDR,192\.168\.3\.45\/32,DIRECT\n/)
+  assert.match(
+    result.content,
+    /rules:\n  - MATCH,DIRECT\n  - SRC-IP-CIDR,192\.168\.3\.45\/32,DIRECT\n/,
+  )
 })
 
 test('proxy domain rule can be inserted into pre custom rules', () => {
@@ -420,10 +423,7 @@ test('custom rule section toggle is read from the OpenClash and Nikki UCI config
     true,
   )
   assert.equal(
-    isOpenWrtCustomRuleEnabledForTesting(
-      'nikki',
-      "config mixin 'mixin'\n  option rule '0'\n",
-    ),
+    isOpenWrtCustomRuleEnabledForTesting('nikki', "config mixin 'mixin'\n  option rule '0'\n"),
     false,
   )
 })
@@ -471,8 +471,14 @@ test('Nikki custom rules are split into pre and post sections around rule sets',
   const preEntries = parseProxyDomainCustomRulesFromYamlContentForTesting(content, 'pre')
   const postEntries = parseProxyDomainCustomRulesFromYamlContentForTesting(content, 'post')
 
-  assert.deepEqual(preEntries.map((entry) => entry.raw), ['DOMAIN,pre.example,DIRECT'])
-  assert.deepEqual(postEntries.map((entry) => entry.raw), ['DOMAIN,post.example,DIRECT'])
+  assert.deepEqual(
+    preEntries.map((entry) => entry.raw),
+    ['DOMAIN,pre.example,DIRECT'],
+  )
+  assert.deepEqual(
+    postEntries.map((entry) => entry.raw),
+    ['DOMAIN,post.example,DIRECT'],
+  )
 })
 
 test('custom rules can be reordered without removing comments or blank lines', () => {

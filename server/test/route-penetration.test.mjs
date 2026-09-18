@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test, { after } from 'node:test'
 
-const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ange-clashboard-route-test-'))
+const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clashboard-singbox-route-test-'))
 const dbPath = path.join(tempDir, 'zashboard.sqlite')
 
 process.env.ZASHBOARD_DB_PATH = dbPath
@@ -424,6 +424,7 @@ const {
   buildDnsQueryPacketForTesting,
   parseDnsResponsePacketForTesting,
   isFakeIpValueForTesting,
+  buildSrsMatchMapForTesting,
 } = await import(serverModuleUrl.href)
 
 const USER_DNS_CONFIG = {
@@ -707,4 +708,76 @@ test('dns config parse: falls back to dns-tagged inbound without explicit dns ty
 
   assert.ok(info)
   assert.deepEqual(info.dnsInbound, { listen: '::', listen_port: 1053 })
+})
+
+test('dns srs match map: decompiled json provider registers hit for dns rule matching', async () => {
+  seedRuleProviderCacheForTesting([
+    {
+      name: 'geosite-cn',
+      behavior: 'srs',
+      format: 'binary',
+      url: 'https://example.test/geosite-cn.srs',
+      body: JSON.stringify({
+        version: 2,
+        rules: [{ domain_suffix: ['baidu.com'] }, { domain: 'example.org' }],
+      }),
+    },
+    {
+      name: 'geoip-cn-text',
+      behavior: 'json',
+      format: 'source',
+      url: 'https://example.test/geoip-cn.json',
+      body: '10.0.0.0/8\n',
+    },
+  ])
+
+  const controllerRules = [
+    { type: 'default', payload: 'rule_set=geosite-cn', proxy: '直连' },
+    { type: 'default', payload: 'rule_set=geoip-cn-text', proxy: '直连' },
+  ]
+
+  const { map } = await buildSrsMatchMapForTesting(controllerRules, 'www.baidu.com', ['geosite-cn'])
+
+  // 反编译 JSON 规则集必须给出确定性命中,否则 DNS 推断会漏掉 domain 类规则集
+  assert.equal(map.get('geosite-cn').hit, true)
+  // 未命中域名给 false,而不是缺省 undefined
+  assert.equal(map.get('geoip-cn-text').hit, false)
+})
+
+test('dns route: scalar rule_set condition matches (sing-box allows scalar form)', () => {
+  const info = parseSingBoxDnsInfoFromConfigForTesting({
+    dns: {
+      servers: [{ tag: 'a', type: 'https', server: '223.5.5.5' }],
+      rules: [
+        { rule_set: 'geosite-cn', server: 'a' },
+        { query_type: ['A', 'AAAA'], server: 'fakeip' },
+      ],
+      final: 'a',
+    },
+  })
+
+  const srsMap = new Map([['geosite-cn', { hit: true }]])
+  const hit = resolveDnsRouteInfoForTesting(
+    normalizeLookupInputForTesting('www.baidu.com'),
+    info,
+    srsMap,
+  )
+
+  assert.equal(hit.server, 'a')
+  assert.equal(hit.matchedRule.summary, 'rule_set: geosite-cn')
+
+  const srsMapMiss = new Map([['geosite-cn', { hit: false }]])
+  const miss = resolveDnsRouteInfoForTesting(
+    normalizeLookupInputForTesting('www.baidu.com'),
+    info,
+    srsMapMiss,
+  )
+
+  assert.equal(miss.server, 'fakeip')
+
+  const names = collectDnsRuleSetNamesForTesting({
+    dns: { rules: [{ rule_set: 'geosite-cn' }, { rule_set: ['geosite-ai', 'geosite-youtube'] }] },
+  })
+
+  assert.deepEqual(names, ['geosite-cn', 'geosite-ai', 'geosite-youtube'])
 })

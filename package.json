@@ -1,7 +1,7 @@
 {
-  "name": "ange-clashboard",
+  "name": "clashboard-singbox",
   "version": "2.06",
-  "description": "AnGe-ClashBoard - A dashboard for Clash API, Mihomo and sing-box",
+  "description": "ClashBoard-singbox - A dashboard for Clash API, Mihomo and sing-box",
   "license": "MIT",
   "type": "module",
   "scripts": {

@@ -97,7 +97,7 @@ const ru: LANG_MESSAGE = {
   dots: 'Точки',
   bar: 'Полоса',
   exportSettings: 'Экспорт настроек',
-  basedOnZashboard: 'На основе zashboard',
+  basedOnZashboard: 'На основе AnGe-ClashBoard & zashboard',
   desensitizedExport: 'Обезличенный экспорт',
   desensitizedExportTip: 'По умолчанию исключает данные подключения к API бэкенда.',
   desensitizedExportDescription:
@@ -126,7 +126,7 @@ const ru: LANG_MESSAGE = {
   secondaryPathTip: 'Если присутствует, начните с "/", в противном случае оставьте пустым.',
   useServerProxy: 'Проксировать через сервер',
   useServerProxyTip:
-    'Сервер AnGe-ClashBoard сам обращается к Mihomo/OpenClash, поэтому панели не нужен прямой публичный доступ к контроллеру.',
+    'Сервер ClashBoard-singbox сам обращается к Mihomo/OpenClash, поэтому панели не нужен прямой публичный доступ к контроллеру.',
   logRetentionLimit: 'Лимит хранения журнала',
   DNSQuery: 'DNS-запрос',
   currentBackendUnavailable:

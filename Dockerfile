@@ -12,7 +12,7 @@ RUN --mount=type=cache,id=pnpm-builder-store,target=/pnpm/store \
 
 COPY . .
 RUN pnpm build
-RUN corepack pnpm --filter ange-clashboard-server-runtime deploy --prod /runtime/server
+RUN corepack pnpm --filter clashboard-singbox-server-runtime deploy --prod /runtime/server
 
 FROM docker.io/node:22-alpine
 

@@ -96,7 +96,7 @@ const zh: LANG_MESSAGE = {
   dots: '点',
   bar: '条',
   exportSettings: '导出设置',
-  basedOnZashboard: '基于 zashboard 开发',
+  basedOnZashboard: '基于 AnGe-ClashBoard / zashboard 二次开发',
   desensitizedExport: '脱敏导出',
   desensitizedExportTip: '默认勾选，导出时不包括 API 后端连接信息。',
   desensitizedExportDescription:
@@ -125,7 +125,7 @@ const zh: LANG_MESSAGE = {
   secondaryPathTip: '如果有的话以/开头，没有则留空不填',
   useServerProxy: '后端中转控制器',
   useServerProxyTip:
-    '由 AnGe-ClashBoard 后端代连 Mihomo/OpenClash，公网访问面板时无需再直连控制器。',
+    '由 ClashBoard-singbox 后端代连 Mihomo/OpenClash，公网访问面板时无需再直连控制器。',
   logRetentionLimit: '日志保留条数',
   DNSQuery: 'DNS 查询',
   currentBackendUnavailable: '当前后端不可用，尝试切换到其他后端?',

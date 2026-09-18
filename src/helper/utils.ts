@@ -37,7 +37,7 @@ export const exportSettings = (options: { desensitized?: boolean } = {}) => {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'ange-clashboard-settings'
+  a.download = 'clashboard-singbox-settings'
   a.click()
   URL.revokeObjectURL(url)
 }

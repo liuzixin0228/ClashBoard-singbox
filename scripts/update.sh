@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="ange-clashboard"
+APP_NAME="clashboard-singbox"
 APP_DIR="/opt/${APP_NAME}"
 SUDO=""
 
@@ -24,5 +24,5 @@ ${SUDO} docker compose pull
 ${SUDO} docker compose up -d
 
 echo
-echo "AnGe-ClashBoard updated successfully."
+echo "ClashBoard-singbox updated successfully."
 echo "Data directory preserved: ${APP_DIR}/data"

@@ -92,12 +92,12 @@ const router = createRouter({
   ],
 })
 
-const title = useTitle('AnGe-ClashBoard')
+const title = useTitle('ClashBoard-singbox')
 const setTitleByName = (name: string | symbol | undefined) => {
   if (typeof name === 'string' && activeBackend.value) {
-    title.value = `AnGe-ClashBoard | ${i18n.global.t(name)}`
+    title.value = `ClashBoard-singbox | ${i18n.global.t(name)}`
   } else {
-    title.value = 'AnGe-ClashBoard'
+    title.value = 'ClashBoard-singbox'
   }
 }
 
@@ -136,7 +136,10 @@ router.beforeEach((to, from) => {
     }
   }
 
-  if (!activeBackend.value && ![ROUTE_NAME.setup, ROUTE_NAME.login].includes(to.name as ROUTE_NAME)) {
+  if (
+    !activeBackend.value &&
+    ![ROUTE_NAME.setup, ROUTE_NAME.login].includes(to.name as ROUTE_NAME)
+  ) {
     return { name: ROUTE_NAME.setup }
   }
 })

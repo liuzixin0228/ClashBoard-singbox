@@ -76,7 +76,7 @@ function requestJson(url) {
         url,
         {
           headers: {
-            'User-Agent': 'AnGe-ClashBoard',
+            'User-Agent': 'ClashBoard-singbox',
             Accept: 'application/vnd.github+json',
           },
         },
@@ -112,7 +112,7 @@ function download(url, redirects = 0) {
         url,
         {
           headers: {
-            'User-Agent': 'AnGe-ClashBoard',
+            'User-Agent': 'ClashBoard-singbox',
             Accept: 'application/octet-stream',
           },
         },
