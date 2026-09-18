@@ -56,7 +56,7 @@ const SETUP_API_LIST_KEY = 'setup/api-list'
 const SETUP_ACTIVE_UUID_KEY = 'setup/active-uuid'
 const RULE_PROVIDER_SOURCE_METADATA_KEY = 'rule-provider-cache/source-metadata'
 const DNS_CONFIG_CACHE_KEY = 'dns-config-cache'
-const ACCESS_SESSION_COOKIE_NAME = 'ange_clashboard_access_session'
+const ACCESS_SESSION_COOKIE_NAME = 'clashboard_singbox_access_session'
 const ACCESS_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const ACCESS_PASSWORD_REQUIRED_CODE = 'ACCESS_PASSWORD_REQUIRED'
 const ACCESS_PASSWORD_INVALID_CODE = 'ACCESS_PASSWORD_INVALID'
@@ -5397,20 +5397,25 @@ const refreshDnsConfigCache = async () => {
 }
 
 // 从缓存的 DNS 配置里收集 rule_set 名单(srs 匹配需要提前算好)
+// sing-box 的条件字段可以是标量或数组,统一按数组求值
+const toArray = (value) => {
+  if (Array.isArray(value)) return value
+
+  return value === undefined || value === null ? [] : [value]
+}
+
 const collectDnsRuleSetNames = (dnsConfig) => {
   const rules = Array.isArray(dnsConfig?.dns?.rules) ? dnsConfig.dns.rules : []
   const names = []
 
   rules.forEach((rule) => {
-    if (Array.isArray(rule?.rule_set)) {
-      rule.rule_set.forEach((name) => {
-        const normalized = String(name || '').trim()
+    toArray(rule?.rule_set).forEach((name) => {
+      const normalized = String(name || '').trim()
 
-        if (normalized && !names.includes(normalized)) {
-          names.push(normalized)
-        }
-      })
-    }
+      if (normalized && !names.includes(normalized)) {
+        names.push(normalized)
+      }
+    })
   })
 
   return names
@@ -5421,42 +5426,26 @@ const summarizeDnsRuleConditions = (rule) => {
   const parts = []
 
   const pushList = (key, values) => {
-    if (!Array.isArray(values) || values.length === 0) return
+    const list = toArray(values)
 
-    parts.push(values.length === 1 ? `${key}: ${String(values[0])}` : `${key}×${values.length}`)
+    if (list.length === 0) return
+
+    parts.push(list.length === 1 ? `${key}: ${String(list[0])}` : `${key}×${list.length}`)
   }
 
   pushList('domain', rule.domain)
   pushList('domain_suffix', rule.domain_suffix)
   pushList('domain_keyword', rule.domain_keyword)
-
-  if (rule.domain_regex !== undefined) {
-    const patterns = Array.isArray(rule.domain_regex) ? rule.domain_regex : [rule.domain_regex]
-
-    pushList('domain_regex', patterns)
-  }
-
+  pushList('domain_regex', rule.domain_regex)
   pushList('rule_set', rule.rule_set)
-
-  if (rule.query_type !== undefined) {
-    const types = Array.isArray(rule.query_type) ? rule.query_type : [rule.query_type]
-
-    pushList(
-      'query_type',
-      types.map((type) => String(type).toUpperCase()),
-    )
-  }
-
-  if (rule.source_ip_cidr !== undefined) {
-    const cidrs = Array.isArray(rule.source_ip_cidr) ? rule.source_ip_cidr : [rule.source_ip_cidr]
-
-    pushList('source_ip_cidr', cidrs)
-  }
+  pushList(
+    'query_type',
+    toArray(rule.query_type).map((type) => String(type).toUpperCase()),
+  )
+  pushList('source_ip_cidr', rule.source_ip_cidr)
 
   if (rule.clash_mode !== undefined) {
-    const modes = Array.isArray(rule.clash_mode) ? rule.clash_mode : [rule.clash_mode]
-
-    parts.push(`clash_mode: ${modes.join(' | ')}`)
+    parts.push(`clash_mode: ${toArray(rule.clash_mode).join(' | ')}`)
   }
 
   return parts.join(' + ') || 'rule'
@@ -5505,16 +5494,16 @@ const resolveDnsRouteInfo = (lookup, dnsConfig, srsMatchMap, orphanMatch = null)
   const matchesDomainConditions = (rule) => {
     let checked = 0
 
-    if (Array.isArray(rule.domain)) {
+    if (rule.domain !== undefined) {
       checked++
 
-      if (!rule.domain.includes(lookup.value)) return false
+      if (!toArray(rule.domain).includes(lookup.value)) return false
     }
 
-    if (Array.isArray(rule.domain_suffix)) {
+    if (rule.domain_suffix !== undefined) {
       checked++
 
-      const matched = rule.domain_suffix.some((suffix) => {
+      const matched = toArray(rule.domain_suffix).some((suffix) => {
         const normalized = String(suffix).replace(/^\+\./, '')
 
         return lookup.value === normalized || lookup.value.endsWith(`.${normalized}`)
@@ -5523,10 +5512,10 @@ const resolveDnsRouteInfo = (lookup, dnsConfig, srsMatchMap, orphanMatch = null)
       if (!matched) return false
     }
 
-    if (Array.isArray(rule.domain_keyword)) {
+    if (rule.domain_keyword !== undefined) {
       checked++
 
-      if (!rule.domain_keyword.some((keyword) => lookup.value.includes(String(keyword)))) {
+      if (!toArray(rule.domain_keyword).some((keyword) => lookup.value.includes(String(keyword)))) {
         return false
       }
     }
@@ -5534,10 +5523,8 @@ const resolveDnsRouteInfo = (lookup, dnsConfig, srsMatchMap, orphanMatch = null)
     if (rule.domain_regex !== undefined) {
       checked++
 
-      const patterns = Array.isArray(rule.domain_regex) ? rule.domain_regex : [rule.domain_regex]
-
       if (
-        !patterns.some((pattern) => {
+        !toArray(rule.domain_regex).some((pattern) => {
           try {
             return new RegExp(String(pattern), 'i').test(lookup.value)
           } catch {
@@ -5549,11 +5536,11 @@ const resolveDnsRouteInfo = (lookup, dnsConfig, srsMatchMap, orphanMatch = null)
       }
     }
 
-    if (Array.isArray(rule.rule_set)) {
+    if (rule.rule_set !== undefined) {
       checked++
 
-      const allMatched = rule.rule_set.every(
-        (name) => srsMatchMap.get(name)?.hit === true || orphanMatch?.hit === true,
+      const allMatched = toArray(rule.rule_set).every(
+        (name) => srsMatchMap.get(String(name))?.hit === true || orphanMatch?.hit === true,
       )
 
       if (!allMatched) return false
@@ -5562,9 +5549,7 @@ const resolveDnsRouteInfo = (lookup, dnsConfig, srsMatchMap, orphanMatch = null)
     if (rule.query_type !== undefined) {
       checked++
 
-      const types = (Array.isArray(rule.query_type) ? rule.query_type : [rule.query_type]).map(
-        (type) => String(type).trim().toUpperCase(),
-      )
+      const types = toArray(rule.query_type).map((type) => String(type).trim().toUpperCase())
 
       if (!types.includes('A') && !types.includes('1')) return false
     }
@@ -5727,15 +5712,31 @@ const buildSrsMatchMap = async (controllerRules, target, extraNames = []) => {
         return
       }
 
-      if (String(cachedProvider.behavior || '').toLowerCase() !== 'srs') return
+      const body = String(cachedProvider.body || '')
+      const lookup = normalizeLookupInput(target)
 
-      // 同步入库的已是反编译源码 JSON:文本求值即可,无需本机/远端二进制
-      if (
-        String(cachedProvider.body || '')
-          .trim()
-          .startsWith('{')
-      )
+      // 反编译出的源码 JSON:文本求值,给出确定性命中结果。
+      // DNS 规则集匹配只读本 map,跳过不写会导致 DNS 推断永远命不中这些规则集
+      if (body.trim().startsWith('{')) {
+        try {
+          const { matches } = findStrictRuleSetMatchesFromSourceJson(lookup, body)
+
+          map.set(name, { hit: matches.length > 0 })
+        } catch (error) {
+          map.set(name, { hit: false, error: getErrorMessage(error) })
+        }
         return
+      }
+
+      // 非二进制规则集(文本 source/json 源码):同样文本求值
+      if (String(cachedProvider.behavior || '').toLowerCase() !== 'srs') {
+        try {
+          map.set(name, { hit: findStrictRuleSetMatches(lookup, body).length > 0 })
+        } catch (error) {
+          map.set(name, { hit: false, error: getErrorMessage(error) })
+        }
+        return
+      }
 
       const url = normalizeRuleProviderUrl(cachedProvider.source_url)
 
@@ -7712,6 +7713,7 @@ export {
   addProxyDomainRuleToYamlContent as addProxyDomainRuleToYamlContentForTesting,
   app,
   buildDnsQueryPacket as buildDnsQueryPacketForTesting,
+  buildSrsMatchMap as buildSrsMatchMapForTesting,
   collectDnsRuleSetNames as collectDnsRuleSetNamesForTesting,
   createAccessSessionToken as createAccessSessionTokenForTesting,
   db,
